@@ -15,7 +15,7 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 | 断电恢复 | 实现 | 成功评分必须已完成 NVS commit |
 | 中文显示、长文本分页 | 实现 | 覆盖中文基本区及规定字符范围；不支持 emoji/富文本 |
 | 电脑 USB 导入 | 实现 | TSV；旧式 APKG 转换；整体替换，并明确重置复习记录 |
-| 完整 APKG/Anki 集合兼容 | 不包含 | 只转换旧式 SQLite Basic/Cloze 文本，不运行 Anki 模板引擎 |
+| 完整 APKG/Anki 集合兼容 | 不包含 | 只转换旧式 SQLite Basic 文本，不运行 Anki 模板引擎 |
 | 图片、音频、TTS、手写、数学公式 | 不包含 | 后续资源包设计 |
 | AnkiWeb、Wi-Fi、账号、FSRS | 不包含 | 后续独立里程碑 |
 | 自动 RTC/关机计时 | 不包含 | 离线学习时钟，用户明确推进日期 |
@@ -129,7 +129,7 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 
 ## 9. 字体与字符覆盖
 
-生成 Noto Sans SC 16px、2bpp、const flash 字体。覆盖 ASCII U+0020..007E、拉丁扩展 U+00A0..024F、中文标点 U+3000..303F、中文基本区 U+4E00..9FFF、全角/半角 U+FF00..FFEF；换行无 glyph。输出 C 文件和覆盖清单；保留上游 OFL 与固定字体来源提交。
+生成 Noto Sans SC 16px、2bpp、const flash 字体。目标范围为 ASCII U+0020..007E、拉丁扩展 U+00A0..024F、中文标点 U+3000..303F、中文基本区 U+4E00..9FFF、全角/半角 U+FF00..FFEF；换行无 glyph。实际字形覆盖以 assets/fonts/pa_font_16.manifest.json 为准：上游字体本身缺少的码点不生成，导入工具和设备拒绝缺字。输出 C 文件和覆盖清单；保留上游 OFL 与固定字体来源提交。
 
 不把字体加载到 RAM。首版可先用内置 ASCII 字体通过编译，但交付中文能力必须实际生成并构建中文字体。若完整字库超过 flash 预算，改用明确的子集并由导入工具拒绝缺字，不能以方框显示伪装中文支持。字体生成失败不得阻塞全部 host 开发，但必须标为验收缺项。
 

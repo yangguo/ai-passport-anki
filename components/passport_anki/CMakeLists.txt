@@ -1,0 +1,6 @@
+if(ANKI_HOST)
+  add_library(passport_anki passport_anki.c codec.c)
+  target_include_directories(passport_anki PUBLIC include)
+else()
+  idf_component_register(SRCS "passport_anki.c" "codec.c" INCLUDE_DIRS "include")
+endif()

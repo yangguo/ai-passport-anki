@@ -5,3 +5,7 @@ sdkconfig.old
 __pycache__/
 *.pyc
 .DS_Store
+
+work/
+.venv/
+.pytest_cache/
