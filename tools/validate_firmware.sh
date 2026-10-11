@@ -5,7 +5,7 @@ set -euo pipefail
 idf.py build
 idf.py size
 python3 tools/check_firmware_layout.py build/ai-passport-anki.bin
-idf.py merge-bin -o build/full.bin
+idf.py merge-bin -o full.bin
 mkdir -p build/artifacts
 cp build/ai-passport-anki.bin build/artifacts/app.bin
 cp build/bootloader/bootloader.bin build/artifacts/bootloader.bin

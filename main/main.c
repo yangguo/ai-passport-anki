@@ -20,7 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LINE_MAX 1200
+#define PA_LINE_MAX 1200
 #define IMPORT_TIMEOUT_US (60LL * 1000 * 1000)
 #define MINUTE_US (60LL * 1000 * 1000)
 
@@ -44,7 +44,7 @@ typedef struct {
     event_type type;
     bsp_btn_t button;
     bsp_btn_ev_t button_event;
-    char line[LINE_MAX + 2];
+    char line[PA_LINE_MAX + 2];
 } event_t;
 static QueueHandle_t events;
 static event_t button_event_storage = {.type = EVENT_BUTTON};
@@ -137,7 +137,7 @@ static const char *rating_name(pa_rating rating) {
 
 static void render(void) {
     if (!title_label || !body_label || !footer_label || !bsp_lvgl_lock(100)) return;
-    char title[96], body[LINE_MAX + 1], footer[160];
+    char title[96], body[PA_LINE_MAX + 1], footer[160];
     snprintf(title, sizeof(title), "Anki  学习日 %" PRIu32, live.now / 1440U);
     body[0] = '\0';
     snprintf(footer, sizeof(footer), "UP/DOWN 选择   OK 确认");
@@ -306,7 +306,7 @@ static void console_reader(void *arg) {
             while ((ch = getchar()) != '\n' && ch != EOF) {}
             reply_error("LINE"); continue;
         }
-        if (n > LINE_MAX + 1) { reply_error("LINE"); continue; }
+        if (n > PA_LINE_MAX + 1) { reply_error("LINE"); continue; }
         event.line[n - 1] = '\0';
         if (n >= 2 && event.line[n - 2] == '\r') event.line[n - 2] = '\0';
         if (xQueueSend(events, &event, 0) != pdTRUE) reply_error("BUSY");
