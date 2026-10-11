@@ -24,6 +24,13 @@ int main(void) {
                                  rendered, sizeof(rendered)));
     assert(strcmp(rendered, "文\nBC") == 0);
 
+    const char english[] = "ab cd";
+    count = pa_layout_pages(english, strlen(english), 3, 2, width, NULL, pages);
+    assert(count == 1);
+    assert(pa_layout_format_page(english, strlen(english), pages[0], 3, width,
+                                 NULL, rendered, sizeof(rendered)));
+    assert(strcmp(rendered, "ab \ncd") == 0);
+
     const char invalid[] = { (char)0xe4, (char)0xb8, 0 };
     assert(pa_layout_pages(invalid, sizeof(invalid), 8, 2, width, NULL, pages) == 0);
     const char missing[] = "A\xf0\x9f\x99\x82";

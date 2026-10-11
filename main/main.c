@@ -52,7 +52,7 @@ static event_t tick_event_storage = {.type = EVENT_TICK};
 static ui_state ui = UI_DECKS;
 static pa_rating selected_rating = PA_GOOD;
 static uint16_t question_page, answer_page;
-static bool confirming_day;
+static bool confirming_day, grade_save_failed;
 static const char *last_error = "";
 static lv_obj_t *title_label, *body_label, *footer_label;
 
@@ -142,7 +142,11 @@ static void render(void) {
     body[0] = '\0';
     snprintf(footer, sizeof(footer), "UP/DOWN 选择   OK 确认");
     if (ui == UI_DECKS) {
-        if (deck_index == deck_count) {
+        if (deck_count == 0) {
+            snprintf(body, sizeof(body), "还没有牌组\n通过 USB 导入 TSV\n\n学习日：%" PRIu32,
+                     live.now / 1440U);
+            snprintf(footer, sizeof(footer), "OK可推进学习日；长按返回");
+        } else if (deck_index == deck_count) {
             snprintf(body, sizeof(body), "推进到下一学习日？\n\n当前学习日：%" PRIu32,
                      live.now / 1440U);
             snprintf(footer, sizeof(footer), "UP/DOWN选择   OK确认推进");
@@ -179,6 +183,7 @@ static void render(void) {
         else if (ui == UI_ANSWER) snprintf(footer, sizeof(footer), "D%" PRIu32 " C%u/%u A%u/%u UP/DOWN 评分OK",
                                           live.now / 1440U, session.current + 1, live.count,
                                           page + 1, (unsigned)count);
+        else if (grade_save_failed) snprintf(footer, sizeof(footer), "存档失败；OK重试  长按返回");
         else snprintf(footer, sizeof(footer), "%s  D%" PRIu32 " C%u/%u UP/DOWN 保存OK",
                       rating_name(selected_rating), live.now / 1440U, session.current + 1, live.count);
     } else if (ui == UI_EMPTY) {
@@ -195,7 +200,8 @@ static void render(void) {
         snprintf(footer, sizeof(footer), "请保持 USB 连接");
     } else {
         snprintf(body, sizeof(body), "存档或设备错误\n%s\n长按 OK 返回。", last_error);
-        snprintf(footer, sizeof(footer), storage_corrupt ? "需显式导入新牌组" : "");
+        snprintf(footer, sizeof(footer), storage_corrupt ? "需显式导入新牌组" :
+                 (!storage_ready ? "NVS 初始化失败；未擦除" : ""));
     }
 draw_labels:
     lv_label_set_text(title_label, title);
@@ -324,8 +330,13 @@ static void do_grade(void) {
     const uint16_t current = session.current;
     pa_card old = live.cards[current];
     const pa_session old_session = session;
-    if (!pa_grade(&live, &session, selected_rating)) { live.cards[current] = old; session = old_session; return; }
-    if (!persist(&live)) { live.cards[current] = old; session = old_session; ui = UI_ERROR; last_error = "评分无法写入存档"; return; }
+    if (!pa_grade(&live, &session, selected_rating)) {
+        live.cards[current] = old; session = old_session; grade_save_failed = true; return;
+    }
+    if (!persist(&live)) {
+        live.cards[current] = old; session = old_session; grade_save_failed = true; return;
+    }
+    grade_save_failed = false;
     begin_deck();
 }
 
@@ -333,7 +344,9 @@ static void process_button(const event_t *event) {
     const bool long_press = event->button_event == BSP_BTN_LONG;
     if (long_press && event->button == BSP_BTN_OK) {
         if (import_tx.active) { abort_import(); ui = storage_corrupt ? UI_ERROR : UI_DECKS; }
-        else if (ui == UI_ERROR && storage_corrupt) { /* Keep the damaged snapshot visible. */ }
+        else if (ui == UI_ERROR && (storage_corrupt || !storage_ready)) {
+            /* Keep unrecoverable storage failures visible without changing data. */
+        }
         else if (ui == UI_CONFIRM_DAY) ui = UI_DECKS;
         else if (ui == UI_RATING) ui = UI_ANSWER;
         else if (ui == UI_QUESTION || ui == UI_ANSWER || ui == UI_EMPTY) ui = UI_DECKS;
@@ -449,6 +462,6 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_timer_create(&timer_args, &clock));
     last_clock_us = esp_timer_get_time();
     ESP_ERROR_CHECK(esp_timer_start_periodic(clock, MINUTE_US));
-    if (storage_corrupt) ui = UI_ERROR;
+    if (storage_corrupt || !storage_ready) ui = UI_ERROR;
     render();
 }
