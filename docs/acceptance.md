@@ -42,3 +42,11 @@
 | 30 分钟学习稳定性及按键响应 | NOT RUN |
 
 未执行刷写、擦除或设备修改。固件编译或主机测试通过不能替代真机验收。
+
+## M6 桌面模拟器本地验收（2026-10-11）
+
+- 工作目录：`/Users/vyang/Desktop/spaces/ai-passport-anki`；编码由 Luna high 完成。
+- `cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON` 与构建通过，CTest 5/5；`.venv/bin/python -m pytest -q tests`：30 passed。
+- 真实子进程验证四档评分到期时间和重启恢复、翻面限制、损坏快照保护、保存失败后会话保留、时间溢出、NUL/内部回车拒绝与超长输入后的恢复。
+- 实际运行 `tools/deck.py commands decks/demo.tsv`，8张卡导入模拟器，显示中文牌组“苹果/apple”并完成 Good 评分与存档。
+- 这些证据只覆盖桌面进程；未运行 LVGL，未执行真机刷写或设备验收。原固件构建记录仍对应上方的源码提交。

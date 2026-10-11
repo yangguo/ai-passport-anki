@@ -34,8 +34,16 @@ cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON
 cmake --build build/host
 ctest --test-dir build/host --output-on-failure
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest tests/test_deck.py -q
+python3 -m pytest tests/test_deck.py tests/test_simulator.py -q
 ```
+
+## 桌面学习模拟器
+
+```sh
+./build/host/passport_sim --state ./study.pak
+```
+
+模拟器可复用调度、快照和导入协议进行命令行练习，但不模拟 LVGL、实体屏幕/按键或 USB 设备时序。完整命令和边界见[模拟器说明](docs/simulator.md)。
 
 ## 固件构建
 

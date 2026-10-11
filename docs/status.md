@@ -18,3 +18,9 @@
 [成功固件构建](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196721)、[成功主机测试](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196776)。具体记录见 [acceptance.md](acceptance.md)。
 
 范围：最多64张多牌组纯文本、三键分页、四评分简化调度、NVS持久化、USB导入。导入替换整集合并清零复习历史；学习时钟不计关机时间。不包含FSRS、AnkiWeb、图片/音频、完整Anki模板或新式APKG兼容。
+
+## M6 桌面学习模拟器（2026-10-11）
+
+Luna high 新增 `passport_sim`，复用固件 C 核心、快照和导入事务。支持命令行导入、翻面、四评分、学习时钟推进和重启恢复；不运行 LVGL，也不模拟硬件。
+
+本地 ASan/UBSan 构建与 CTest 5/5、pytest 30/30 均通过；使用真实 `tools/deck.py` 生成 demo.tsv 的8张卡导入命令后，中文牌组复习及存档通过。详情见 [simulator.md](simulator.md)。真机验收仍为 NOT RUN。
