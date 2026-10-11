@@ -11,7 +11,20 @@
 | Python 导入与上传测试 | PASS | 本次 pytest 20/20；上传传输使用 fake serial，未实机导入 |
 | 分页/输入协议 host 检查 | PASS | CTest layout/protocol/import；真实 LVGL 渲染仍需设备检查 |
 | 中文字库生成/覆盖 | PASS | Noto固定版本，21,509字形；缺字按manifest拒绝；生成重跑字节一致 |
-| ESP32-C3 编译/size/镜像 | PENDING | 本机无 IDF；由 GitHub Actions 构建 |
+| ESP32-C3 编译/size/镜像 | PASS | ESP-IDF 5.5.3 Actions；app/full/分区产物下载与内容校验通过 |
+
+## 远端构建与镜像核对
+
+- 构建源码提交：`d5d3311122f80f292cde35752e96c1e5bad1f240`。
+- [Firmware SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196721)：编译、size、分区检查、merge-bin、上传全部成功。
+- [Host tests SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196776)：ASan/UBSan CTest 5/5 + pytest 20/20。
+- 下载后核对 `source-revision.txt` 与源码提交完全一致；应用头为 ESP32-C3 / 8 MiB flash。
+- 应用镜像 2,144,528 字节，factory分区容量 8,060,928 字节；完整镜像 2,472,208 字节。
+- 完整镜像的 `0x50000` 应用内容和 `0x8000` 分区表内容与独立产物逐字节相同。
+- `app.bin` SHA-256：`b31fce4b2f80a162bc9d00ae2eb09b39d5be2d55e4cea41967cdd1cfdd6d1c90`。
+- `full.bin` SHA-256：`2b376e2c99738ab76728fa40fb8f08ffa3a0724f253d994aa5604495cabb19f9`。
+- 链接期 DRAM：224,234 / 321,296字节，剩余97,062字节；这是链接统计，运行时heap/栈余量仍为NOT RUN。
+- 字体生成依赖更新至 fonttools 4.60.2，重新生成字体字节一致；GitHub依赖告警已记录为fixed。
 
 ## 真机验收
 
