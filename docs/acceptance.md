@@ -50,3 +50,5 @@
 - 真实子进程验证四档评分到期时间和重启恢复、翻面限制、损坏快照保护、保存失败后会话保留、时间溢出、NUL/内部回车拒绝与超长输入后的恢复。
 - 实际运行 `tools/deck.py commands decks/demo.tsv`，8张卡导入模拟器，显示中文牌组“苹果/apple”并完成 Good 评分与存档。
 - 这些证据只覆盖桌面进程；未运行 LVGL，未执行真机刷写或设备验收。原固件构建记录仍对应上方的源码提交。
+
+源码提交：`4d7e63cfb7797eab056704e50d712044a71b2a8c`；[Host CI SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/38132744938)（CTest 5/5、pytest 30/30）；[Firmware CI SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/38132744957)（编译、分区/size检查、合并镜像及上传产物）。本次未另行下载镜像校验，也未执行真机验收。

@@ -14,6 +14,27 @@ Omit `--state ./study.pak` to keep all changes in memory for that process only. 
 
 Use a state path from one simulator process at a time; interprocess locking is not implemented. File `fsync` followed by rename gives atomic replacement behavior, but the simulator does not sync the parent directory. Sudden power loss can therefore lose the renamed directory entry on filesystems that require a directory sync for that guarantee.
 
+## Load the bundled demo
+
+```sh
+python3 tools/deck.py commands decks/demo.tsv --output build/demo.commands
+./build/host/passport_sim --state build/study.pak < build/demo.commands
+./build/host/passport_sim --state build/study.pak
+```
+
+In the interactive session, type these commands one at a time:
+
+```text
+DECK 中文常用词
+NEXT
+FLIP
+RATE GOOD
+NEXT
+QUIT
+```
+
+The first process imports all eight demo cards and exits at end of input; the second loads the saved collection. Running the import again replaces the collection and resets its review history.
+
 ## Study commands
 
 - `HELP` lists the commands.
