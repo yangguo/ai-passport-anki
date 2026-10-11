@@ -1,8 +1,9 @@
 import importlib.util
-import sys
-import io
+import json
 import sqlite3
+import sys
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -37,9 +38,9 @@ def test_parse_anki_text_export_with_two_fields(tmp_path):
     ("id\tdeck\tfront\tback\n1\tD\t\tA\n", "front.*empty"),
     ("id\tdeck\tfront\tback\n1\tD\tQ\tA\n1\tD\tQ2\tA2\n", "duplicate.*id"),
     ("id\tdeck\tfront\tback\n4294967296\tD\tQ\tA\n", "id.*range"),
-    ("id\tdeck\tfront\tback\n1\tD\tQ\t" + "x" * 256 + "\n", "255 bytes"),
+    ("id\tdeck\tfront\tback\n1\tD\tQ\t" + "x" * 512 + "\n", "511 bytes"),
     ("id\tdeck\tfront\tback\n1\tD\tQ\x01x\tA\n", "control"),
-    ("id\tdeck\tfront\tback\n1\tD\temoji 😀\tA\n", r"unsupported.*U\+"),
+    ("id\tdeck\tfront\tback\n1\tD\temoji 😀\tA\n", r"no pa_font_16 glyph.*U\+1F600"),
 ])
 def test_tsv_rejects_invalid_card_text(tmp_path, contents, message):
     path = tmp_path / "bad.tsv"
@@ -48,23 +49,35 @@ def test_tsv_rejects_invalid_card_text(tmp_path, contents, message):
         deck.load_deck(path)
 
 
-def test_tsv_rejects_more_than_64_cards(tmp_path):
+def test_tsv_rejects_more_than_12000_cards(tmp_path):
     path = tmp_path / "too-many.tsv"
-    rows = ["id\tdeck\tfront\tback"] + [f"{i}\tD\tQ{i}\tA{i}" for i in range(1, 66)]
+    rows = ["id\tdeck\tfront\tback"] + [f"{i}\tD\tQ\tA" for i in range(1, deck.MAX_CARDS + 2)]
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
-    with pytest.raises(deck.DeckError, match="64 cards"):
+    with pytest.raises(deck.DeckError, match="12000 cards"):
         deck.load_deck(path)
+
+
+def test_tsv_accepts_kana_pitch_marks_and_511_byte_side(tmp_path):
+    path = tmp_path / "kana.tsv"
+    back = "あいう①α…" + ("字" * 160)
+    assert len(back.encode("utf-8")) <= 511
+    path.write_text("id\tdeck\tfront\tback\n1\t語彙\t\"漢字\nかんじ\"\t" + back + "\n", encoding="utf-8")
+    card = deck.load_deck(path)[0]
+    assert card.front == "漢字\nかんじ"
+    assert card.back.startswith("あいう①α…")
 
 
 def test_commands_are_hex_encoded_bounded_and_finish_with_commit(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\t中文\t问题\t答案\n", encoding="utf-8")
-    commands = deck.commands_for(deck.load_deck(path))
-    assert commands == [
-        "BEGIN 1",
-        "CARD 1 e4b8ade69687 e997aee9a298 e7ad94e6a188",
-        "COMMIT",
-    ]
+    cards = deck.load_deck(path)
+    commands = deck.commands_for(cards)
+    payload = deck.payload_for(cards)
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    assert commands[0] == f"BEGIN 1 {crc} {len(payload)}"
+    assert commands[1] == f"CHUNK 0 {payload.hex()}"
+    assert commands[-1] == "COMMIT"
+    assert payload[4:9] == bytes([len("中文".encode()), 6, 0, 6, 0])
     assert all(len(line.encode("ascii")) <= deck.MAX_LINE_BYTES for line in commands)
 
 
@@ -102,7 +115,7 @@ def test_apkg_basic_converts_html_to_plain_text_and_deck_name(tmp_path):
     path = tmp_path / "basic.apkg"
     _make_apkg(path)
     cards = deck.load_deck(path)
-    assert cards == [deck.Card(1, "Language", "Question\ntwo", "Answer")]
+    assert cards == [deck.Card(1, "Language", "Question\ntwo", "Answer", "1")]
 
 
 def test_apkg_rejects_cloze_and_custom_models(tmp_path):
@@ -152,17 +165,23 @@ def test_upload_waits_for_matching_ack_and_succeeds_only_after_commit(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
     serial = FakeSerial([
-        "boot: ready", "OK INFO version=1 cards=0 day=0",
-        "OK BEGIN", "OK CARD", "OK COMMIT",
+        "boot: ready", "OK INFO version=2 cards=0 day=0 cap=12000",
+        "OK BEGIN resume=0", "OK CHUNK 12", "OK COMMIT",
     ])
     deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
-    assert serial.writes == ["INFO", "BEGIN 1", "CARD 1 44 51 41", "COMMIT"]
+    assert serial.writes[0] == "INFO"
+    assert serial.writes[1].startswith("BEGIN 1 ")
+    assert serial.writes[2].startswith("CHUNK 0 ")
+    assert serial.writes[3] == "COMMIT"
 
 
 def test_upload_aborts_on_err_and_never_reports_success(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
-    serial = FakeSerial(["OK INFO version=1 cards=0 day=0", "OK BEGIN", "ERR INVALID", "OK ABORT"])
+    serial = FakeSerial([
+        "OK INFO version=2 cards=0 day=0 cap=12000", "OK BEGIN resume=0",
+        "ERR INVALID", "ERR TRANSACTION", "OK ABORT",
+    ])
     with pytest.raises(deck.DeckError, match="device error.*INVALID"):
         deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
     assert serial.writes[-1] == "ABORT"
@@ -171,8 +190,8 @@ def test_upload_aborts_on_err_and_never_reports_success(tmp_path):
 def test_upload_timeout_aborts_and_raises(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
-    serial = FakeSerial(["OK INFO version=1 cards=0 day=0", "OK BEGIN", ""])
-    with pytest.raises(deck.DeckError, match="timeout.*CARD"):
+    serial = FakeSerial(["OK INFO version=2 cards=0 day=0 cap=12000", "OK BEGIN resume=0", ""])
+    with pytest.raises(deck.DeckError, match="timeout.*CHUNK"):
         deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial, command_timeout=0.001)
     assert "ABORT" in serial.writes
 
@@ -181,20 +200,101 @@ def test_upload_rejects_mismatched_ack_instead_of_accepting_it(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
     serial = FakeSerial([
-        "OK INFO version=1 cards=0 day=0", "OK CARD", "OK ABORT",
+        "OK INFO version=2 cards=0 day=0 cap=12000", "OK CARD", "OK ABORT",
     ])
-    with pytest.raises(deck.DeckError, match="timeout.*BEGIN 1"):
+    with pytest.raises(deck.DeckError, match="timeout.*BEGIN"):
         deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial, command_timeout=0.001)
-    assert serial.writes == ["INFO", "BEGIN 1", "ABORT"]
+    assert serial.writes[0] == "INFO"
+    assert serial.writes[1].startswith("BEGIN 1 ")
+    assert serial.writes[-1] == "ABORT"
 
 
 def test_upload_rejects_unknown_device_protocol_version(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
-    serial = FakeSerial(["OK INFO version=2 cards=0 day=0"])
-    with pytest.raises(deck.DeckError, match="protocol version 2"):
+    serial = FakeSerial(["OK INFO version=9 cards=0 day=0 cap=12000"])
+    with pytest.raises(deck.DeckError, match="protocol version 9"):
         deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
     assert serial.writes == ["INFO"]
+
+
+def test_jlpt_model_strips_media_and_expands_furigana(tmp_path):
+    path = tmp_path / "jlpt.apkg"
+    db_path = tmp_path / "jlpt.sqlite"
+    fields = "\x1f".join([
+        "note",
+        "漢字",
+        "①",
+        "名",
+        "漢[かん]字[じ]",
+        "<b>简体定义</b>",
+        "繁體",
+        "补充",
+        "[sound:vocab.mp3]",
+        "A", "", "", "",
+        "例[れい]文",
+        "例文",
+        "例句释义",
+        "例句繁体",
+        "[sound:sent.mp3]",
+        "", "", "", "", "", "", "", "", "",
+        "1", "", "",
+    ])
+    names = [
+        "NoteID", "VocabKanji", "VocabPitch", "VocabPoS", "VocabFurigana", "VocabDefSC", "VocabDefTC",
+        "VocabPlus", "VocabAudio", "SentType1", "SentType2", "SentType3", "SentType4",
+        "SentFurigana1", "SentKanji1", "SentDefSC1", "SentDefTC1", "SentAudio1",
+        "SentFurigana2", "SentKanji2", "SentDefSC2", "SentDefTC2", "SentAudio2",
+        "SentFurigana3", "SentKanji3", "SentDefSC3", "SentDefTC3", "SentAudio3",
+        "SentFurigana4", "SentKanji4", "SentDefSC4", "SentDefTC4", "SentAudio4",
+        "Order", "Alt1", "Alt2",
+    ]
+    model = {"id": 10, "name": "eggrolls-JLPT10k-v3.5", "type": 0,
+             "flds": [{"name": name} for name in names]}
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TABLE col (models TEXT, decks TEXT)")
+    db.execute("CREATE TABLE notes (id INTEGER, mid INTEGER, flds TEXT)")
+    db.execute("CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER)")
+    db.execute("INSERT INTO col VALUES (?, ?)", (
+        json.dumps({"10": model}),
+        json.dumps({"20": {"id": 20, "name": "JLPT::N5::1-高频"}}),
+    ))
+    db.execute("INSERT INTO notes VALUES (7, 10, ?)", (fields,))
+    db.execute("INSERT INTO cards VALUES (99, 7, 20)")
+    db.commit()
+    db.close()
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.write(db_path, "collection.anki2")
+        archive.write(db_path, "collection.anki21")
+        archive.writestr("0", b"not-media-extracted")
+    card = deck.load_deck(path)[0]
+    assert card.id == 1
+    assert card.anki_id == "99"
+    assert card.deck == "JLPT::N5::1-高频"
+    assert card.front == "漢字\n漢（かん）字（じ）"
+    assert "简体定义" in card.back
+    assert "例（れい）文" in card.back
+    assert "sound" not in card.back
+    assert "繁體" not in card.back
+
+
+def test_upload_resumes_from_device_offset(tmp_path):
+    path = tmp_path / "cards.tsv"
+    path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
+    cards = deck.load_deck(path)
+    payload = deck.payload_for(cards)
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    serial = FakeSerial([
+        "OK INFO version=2 cards=0 day=0 cap=12000",
+        "OK BEGIN resume=0",
+        "ERR BUSY",
+        f"OK RESUME offset=0 count=1 crc={crc} length={len(payload)}",
+        "OK CHUNK 12",
+        "OK COMMIT",
+    ])
+    deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
+    assert "RESUME" in serial.writes
+    assert serial.writes[-1] == "COMMIT"
 
 
 def test_font_manifest_records_actual_requested_range_coverage():
@@ -203,6 +303,13 @@ def test_font_manifest_records_actual_requested_range_coverage():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["font_symbol"] == "pa_font_16"
     assert manifest["source_revision"] == "f8d157532fbfaeda587e826d4cd5b21a49186f7c"
-    assert manifest["requested_glyph_count"] == 21823
-    assert manifest["supported_glyph_count"] == 21509
-    assert manifest["unsupported_glyph_count"] == 314
+    assert manifest["requested_glyph_count"] == 22447
+    assert manifest["supported_glyph_count"] == 21957
+    assert manifest["unsupported_glyph_count"] == 490
+
+    def covers(codepoint: int) -> bool:
+        return any(start <= codepoint <= end for start, end in manifest["supported_ranges"])
+
+    assert covers(0x3042) and covers(0x30A2) and covers(0x30F6)
+    assert covers(0x2460) and covers(0x2473) and covers(0x24EA)
+    assert covers(0x03B1) and covers(0x2026)

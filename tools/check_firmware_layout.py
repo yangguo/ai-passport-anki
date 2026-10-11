@@ -10,7 +10,9 @@ FLASH_SIZE = 0x800000
 EXPECTED = [
     ("nvs", 0x9000, 0x40000),
     ("phy_init", 0x49000, 0x1000),
-    ("factory", 0x50000, 0x7B0000),
+    ("factory", 0x50000, 0x280000),
+    ("cards", 0x2D0000, 0x460000),
+    ("sched", 0x730000, 0xD0000),
 ]
 
 
@@ -22,12 +24,12 @@ def main() -> int:
         raise SystemExit(f"unexpected partition map: {actual!r}")
     if EXPECTED[-1][1] + EXPECTED[-1][2] != FLASH_SIZE:
         raise SystemExit("partition map does not end at 8 MiB")
+    factory = next(size for name, _offset, size in EXPECTED if name == "factory")
     app = pathlib.Path(sys.argv[1])
     size = app.stat().st_size
-    limit = EXPECTED[-1][2]
-    if size > limit:
-        raise SystemExit(f"app is {size} bytes; factory partition allows {limit}")
-    print(f"partition map valid; app image {size}/{limit} bytes")
+    if size > factory:
+        raise SystemExit(f"app is {size} bytes; factory partition allows {factory}")
+    print(f"partition map valid; app image {size}/{factory} bytes")
     return 0
 
 

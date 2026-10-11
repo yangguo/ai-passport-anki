@@ -1,6 +1,6 @@
 if(ANKI_HOST)
-  add_library(passport_anki passport_anki.c codec.c)
+  add_library(passport_anki passport_anki.c codec.c pa_store.c)
   target_include_directories(passport_anki PUBLIC include)
 else()
-  idf_component_register(SRCS "passport_anki.c" "codec.c" INCLUDE_DIRS "include")
+  idf_component_register(SRCS "passport_anki.c" "codec.c" "pa_store.c" INCLUDE_DIRS "include")
 endif()

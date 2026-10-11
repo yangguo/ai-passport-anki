@@ -2,9 +2,9 @@
 
 ## 卡片准备
 
-电脑准备 UTF-8 TSV，第一行为四列：`id`、`deck`、`front`、`back`。每张卡 ID 唯一非零，多个相同 deck 名的卡归为同一牌组。最多64张、牌组名最多47 UTF-8字节、每面最多255 UTF-8字节；中文通常每字3字节。使用标准TSV引用字段可以包含换行。
+电脑准备 UTF-8 TSV，第一行为四列：`id`、`deck`、`front`、`back`。每张卡 ID 唯一非零，多个相同 deck 名的卡归为同一牌组。最多 12,000 张、最多 64 个牌组、牌组名最多 47 UTF-8 字节、每面最多 511 UTF-8 字节。中文通常每字 3 字节，假名也是 3 字节。标准 TSV 引用字段可以包含换行。超出长度会报错，不会截断。
 
-从 Anki 导出文字时，优先采用 UTF-8 文本，再转换为本项目规范。旧式 Basic APKG 可转换；Cloze、复杂模板、collection.anki21b、媒体资源不在首版范围。转换失败时工具会明确报错。
+从 Anki 导出文字时，优先采用 UTF-8 文本。旧式 Basic APKG 可转换。字段里带 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组（例如 [anki-jlpt-decks](https://github.com/5mdld/anki-jlpt-decks) 的 `eggrolls-JLPT10k-v3.5.apkg`）会取词条、假名、声调、词性和简体释义，并带上第一条例句；音频和图片丢弃，`汉字[假名]` 写成 `汉字（假名）`。Cloze、复杂模板、`collection.anki21b` 不转换。`--map out.json` 把设备上的 u32 ID 对应到 Anki 卡片 ID（JSON 里用字符串），这个文件是本地数据，不要提交进仓库。设备不上网，也不保存 Anki 的 64 位 ID。
 
 ```sh
 python3 tools/deck.py inspect decks/demo.tsv
@@ -13,7 +13,7 @@ python3 -m pip install -r requirements.txt
 python3 tools/deck.py upload decks/demo.tsv --port /dev/cu.usbmodem1101
 ```
 
-端口需使用自己电脑上实际设备路径。导入会整体替换设备卡片并重置复习历史，只有设备返回 `OK COMMIT` 才算成功。导入失败不应显示“成功”；错误/超时后工具尝试 ABORT，设备也有事务超时保护。
+端口需使用自己电脑上实际设备路径。导入会整体替换设备卡片并重置复习历史，只有设备返回 `OK COMMIT` 才算成功。数据按最多 480 字节一块上传。中断后再次 upload 会从设备已经写好的位置继续；对不上时工具才 ABORT。COMMIT 可能要比单块更久，默认等待 120 秒。
 
 ## 三键复习
 
