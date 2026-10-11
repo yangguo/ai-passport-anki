@@ -12,4 +12,4 @@ cp build/bootloader/bootloader.bin build/artifacts/bootloader.bin
 cp build/partition_table/partition-table.bin build/artifacts/partition-table.bin
 cp build/full.bin build/artifacts/full.bin
 idf.py size > build/artifacts/size.txt
-git rev-parse HEAD > build/artifacts/source-revision.txt
+git -c safe.directory="$PWD" rev-parse HEAD > build/artifacts/source-revision.txt
