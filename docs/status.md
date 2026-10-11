@@ -26,3 +26,7 @@ Luna high 新增 `passport_sim`，复用固件 C 核心、快照和导入事务�
 本地 ASan/UBSan 构建与 CTest 5/5、pytest 30/30 均通过；使用真实 `tools/deck.py` 生成 demo.tsv 的8张卡导入命令后，中文牌组复习及存档通过。详情见 [simulator.md](simulator.md)。真机验收仍为 NOT RUN。
 
 源码提交：`4d7e63cfb7797eab056704e50d712044a71b2a8c`；[Host CI SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/38132744938)（CTest 5/5、pytest 30/30）；[Firmware CI SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/38132744957)（编译、分区/size检查、合并镜像及上传产物）。本次未另行下载镜像校验，也未执行真机验收。
+
+## AnkiWeb 同步可行性（2026-10-11）
+
+仅文档，未改固件或导入工具。[ankiweb-sync.md](ankiweb-sync.md) 的结论：设备不登录 AnkiWeb，也不在设备上做集合同步。推荐由官方客户端完成本地同步后，电脑读取本机集合，转成现有 TSV，经 USB 导入；复习回写交给本机 Anki 的评分函数。该实现尚未开始。

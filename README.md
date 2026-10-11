@@ -16,6 +16,8 @@ FoloToy AI Passport 离线文字闪卡复习器：牌组选择 → 翻面 → Ag
 
 完整 Anki 模板/FSRS/AnkiWeb/图片/音频不在首版范围。离线学习时钟不计入关机时间，日期由菜单或电脑命令推进。导入会整体替换卡片并重置复习历史。
 
+AnkiWeb 登录和牌组同步的可行性见[设计](docs/ankiweb-sync.md)。设备不连接 AnkiWeb；以后若要把牌组带到设备上，由电脑读取本机已经同步好的 Anki 集合，再走现有 USB 导入。
+
 ## 电脑导入
 
 ```sh
