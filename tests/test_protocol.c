@@ -21,8 +21,16 @@ int main(void)
 {
     assert(pa_protocol_parse("INFO\r\n", 6, &command));
     assert(command.kind == PA_PROTOCOL_INFO);
-    assert(pa_protocol_parse("BEGIN 64\n", 9, &command));
-    assert(command.kind == PA_PROTOCOL_BEGIN && command.value == 64);
+    assert(pa_protocol_parse("BEGIN 64 0 704\n", 15, &command));
+    assert(command.kind == PA_PROTOCOL_BEGIN && command.value == 64 && command.crc == 0 && command.length == 704);
+    assert(pa_protocol_parse("BEGIN 12000 99 132000", 21, &command));
+    assert(command.kind == PA_PROTOCOL_BEGIN && command.value == 12000 && command.crc == 99);
+    assert(pa_protocol_parse("RESUME\n", 7, &command) && command.kind == PA_PROTOCOL_RESUME);
+    assert(pa_protocol_parse("CHUNK 0 010000000101000100445141", 32, &command));
+    assert(command.kind == PA_PROTOCOL_CHUNK && command.value == 0 && command.length == 12);
+    assert(memcmp(command.chunk, "\x01\x00\x00\x00\x01\x01\x00\x01\x00\x44\x51\x41", 12) == 0);
+    assert(pa_protocol_parse("CHUNK 4 00ff", 12, &command));
+    assert(command.length == 2 && command.chunk[0] == 0 && command.chunk[1] == 0xff);
     assert(pa_protocol_parse("DAY 4294967295", 14, &command));
     assert(command.kind == PA_PROTOCOL_DAY && command.value == UINT32_MAX);
     const char *card_line = " CARD\t7\tE8AFADE8A880\tE4BDA0E5A5BD\t68690A7468657265 \r\n";
@@ -35,8 +43,17 @@ int main(void)
     assert(pa_protocol_parse("ABORT", 5, &command) && command.kind == PA_PROTOCOL_ABORT);
 
     REJECTS("BEGIN 0");
-    REJECTS("BEGIN 65");
-    REJECTS("BEGIN 4294967296");
+    REJECTS("BEGIN 64");
+    REJECTS("BEGIN 12001 0 132011");
+    REJECTS("BEGIN 1 0 10");
+    REJECTS("BEGIN 4294967296 0 11");
+    REJECTS("CHUNK 0 0");
+    REJECTS("CHUNK 0 gg");
+    char huge_chunk[1100];
+    memset(huge_chunk, 'A', sizeof(huge_chunk));
+    memcpy(huge_chunk, "CHUNK 0 ", 8);
+    huge_chunk[8 + 962] = '\0';
+    REJECTS(huge_chunk);
     REJECTS("DAY -1");
     REJECTS("DAY 12x");
     REJECTS("INFO trailing");

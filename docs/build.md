@@ -45,7 +45,12 @@ device's current partition map.
 | --- | ---: | ---: |
 | NVS | 0x9000 | 0x40000 |
 | PHY init | 0x49000 | 0x1000 |
-| Factory app | 0x50000 | 0x7b0000 |
+| Factory app | 0x50000 | 0x280000 |
+| Cards | 0x2D0000 | 0x460000 |
+| Schedule | 0x730000 | 0xD0000 |
 
-The map ends at 0x800000. These offsets are specific to this standalone
-firmware. Do not reuse app-only offsets from another AI Passport project.
+The map ends at 0x800000. Factory stays at 0x50000 so the application
+remains 64 KiB aligned; NVS keeps its old size so a legacy snapshot can be
+migrated. Cards and schedule occupy space that used to be inside the factory
+image, so updates need the full partition table. Do not reuse app-only offsets
+from another AI Passport project.

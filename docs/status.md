@@ -17,7 +17,17 @@
 
 [成功固件构建](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196721)、[成功主机测试](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196776)。具体记录见 [acceptance.md](acceptance.md)。
 
-范围：最多64张多牌组纯文本、三键分页、四评分简化调度、NVS持久化、USB导入。导入替换整集合并清零复习历史；学习时钟不计关机时间。不包含FSRS、AnkiWeb、图片/音频、完整Anki模板或新式APKG兼容。
+范围：最多 12,000 张多牌组纯文本、三键分页、四评分简化调度、分区存档、USB 分块导入。导入替换整组并清零复习历史；从旧 PAK1 迁移时保留复习状态。学习时钟不计关机时间。不包含 FSRS、AnkiWeb、图片/音频、完整 Anki 模板或 anki21b。
+
+## 万张容量（2026-10-11）
+
+正文改到 `cards` 分区的双槽里按需读取，调度记录放在 `sched` 分区的 4 KiB 块中，到期队列按块扫描。稳态 RAM 是一份 `pa_store`（不超过 12 KiB）加上当前卡的两面缓冲。提交时的临时堆有 64 KiB 上限，选卡和评分不再分配。协议为 version 2：`BEGIN count crc length`、`CHUNK`、`RESUME`、`COMMIT`。
+
+用 `eggrolls-JLPT10k-v3.5` 的 `collection.anki21`（10,641 张、11 个牌组）在电脑上转换：正面最长 52 字节，背面最长 479 字节，其中 105 张背面超过 255 字节，没有一面超过 511 字节。规范 payload 1,944,239 字节，放进 2,097,152 字节的槽 payload。转换后的字符都在更新后的 Noto Sans SC 字体里（请求 22,447，生成 21,957）。字体补了假名、带圈声调号、省略号和 α。
+
+主机测试覆盖 10,000 张导入、选卡和评分时堆占用为 0、评分扇区写失败后旧卡仍在、超级块未发布时旧牌组仍在、PAK1 迁移保留 Again 的到期时间。`pa_store` 静态大小 7,840 字节。提交 10,000 张时的临时堆低于 64 KiB，返回后为 0。
+
+本地 `tools/validate_firmware.sh`（ESP-IDF 5.5.3）通过。应用镜像 2,176,832 / 2,621,440 字节，factory 余量 444,608 字节。链接后 DRAM 115,842 字节，剩余 205,454 / 321,296。Flash 只读数据约 1.62 MiB，其中大部分是字体。cards 分区 4,587,520 字节（两槽各 2,293,760，payload 上限 2,097,152），sched 分区 851,968 字节。这些是编译和主机测试数字。真机刷写、USB 传输和掉电仍是 NOT RUN。
 
 ## M6 桌面学习模拟器（2026-10-11）
 

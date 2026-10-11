@@ -4,6 +4,8 @@
 #include "bsp_power.h"
 #include "bsp_pins.h"
 #include "esp_log.h"
+#include "esp_partition.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -12,8 +14,8 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "pa_layout.h"
-#include "pa_import.h"
 #include "pa_protocol.h"
+#include "pa_store.h"
 #include "passport_anki.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -26,16 +28,18 @@
 
 extern const lv_font_t pa_font_16;
 static const char *TAG = "anki";
-static pa_collection live, staging;
+static pa_store store;
+static pa_flash cards_flash;
+static pa_flash sched_flash;
 static pa_session session;
-static uint8_t snapshot[PA_SNAPSHOT_MAX];
-static char deck_names[PA_MAX_CARDS][PA_DECK_BYTES];
-static uint16_t deck_count, deck_index;
 static nvs_handle_t nvs;
-static bool storage_ready, storage_corrupt;
-static pa_import_tx import_tx;
+static bool nvs_ready, storage_ready, storage_corrupt;
 static int64_t import_last_input, last_checkpoint;
 static int64_t last_clock_us;
+static char card_deck[PA_DECK_BYTES];
+static char card_front[PA_STORE_TEXT_MAX + 1u];
+static char card_back[PA_STORE_TEXT_MAX + 1u];
+static uint32_t glyph_checks;
 
 typedef enum { UI_DECKS, UI_QUESTION, UI_ANSWER, UI_RATING, UI_EMPTY,
                UI_CONFIRM_DAY, UI_IMPORTING, UI_ERROR } ui_state;
@@ -51,38 +55,44 @@ static event_t button_event_storage = {.type = EVENT_BUTTON};
 static event_t tick_event_storage = {.type = EVENT_TICK};
 static ui_state ui = UI_DECKS;
 static pa_rating selected_rating = PA_GOOD;
-static uint16_t question_page, answer_page;
+static uint16_t deck_index, question_page, answer_page;
 static bool confirming_day, grade_save_failed;
 static const char *last_error = "";
 static lv_obj_t *title_label, *body_label, *footer_label;
 
-static bool persist(const pa_collection *collection) {
-    if (!storage_ready) return false;
-    size_t size = pa_encode(collection, snapshot, sizeof(snapshot));
-    if (!size || nvs_set_blob(nvs, "snapshot", snapshot, size) != ESP_OK ||
-        nvs_commit(nvs) != ESP_OK) return false;
-    return true;
+static bool part_read(void *ctx, uint32_t offset, void *dst, uint32_t length)
+{
+    return esp_partition_read(ctx, offset, dst, length) == ESP_OK;
 }
 
-static bool persist_import(const pa_collection *collection, void *user) {
-    (void)user;
-    return persist(collection);
+static bool part_write(void *ctx, uint32_t offset, const void *src, uint32_t length)
+{
+    uint8_t tail[16];
+    uint32_t aligned = length & ~15u;
+    if (aligned != 0 && esp_partition_write(ctx, offset, src, aligned) != ESP_OK) {
+        return false;
+    }
+    uint32_t rest = length - aligned;
+    if (rest == 0) {
+        return true;
+    }
+    memset(tail, 0xff, sizeof(tail));
+    memcpy(tail, (const uint8_t *)src + aligned, rest);
+    return esp_partition_write(ctx, offset + aligned, tail, sizeof(tail)) == ESP_OK;
 }
 
-static bool load_snapshot(void) {
-    size_t size = 0;
-    esp_err_t err = nvs_get_blob(nvs, "snapshot", NULL, &size);
-    if (err == ESP_ERR_NVS_NOT_FOUND) { pa_init(&live); return persist(&live); }
-    if (err != ESP_OK || size > sizeof(snapshot)) return false;
-    if (nvs_get_blob(nvs, "snapshot", snapshot, &size) != ESP_OK ||
-        !pa_decode(&staging, snapshot, size)) return false;
-    live = staging;
-    return true;
+static bool part_erase(void *ctx, uint32_t offset, uint32_t length)
+{
+    return esp_partition_erase_range(ctx, offset, length) == ESP_OK;
 }
 
-static bool collection_save_then_swap(const pa_collection *next) {
-    if (!persist(next)) return false;
-    live = *next;
+static bool open_partition(pa_flash *flash, const char *name, uint32_t expected)
+{
+    const esp_partition_t *part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, name);
+    if (part == NULL || part->size != expected) {
+        return false;
+    }
+    *flash = (pa_flash){.ctx = (void *)part, .size = part->size, .read = part_read, .write = part_write, .erase = part_erase};
     return true;
 }
 
@@ -93,41 +103,34 @@ static uint16_t glyph_width(uint32_t cp, void *user) {
                ? glyph.adv_w : 0;
 }
 
-static bool card_supported(const pa_card *card) {
+static bool text_fits(const char *text) {
     pa_text_page pages[PA_LAYOUT_MAX_PAGES];
-    const size_t width = BSP_LCD_W - 36;
-    return pa_layout_pages(card->deck, strlen(card->deck), width, 4,
-                           glyph_width, NULL, pages) != 0 &&
-           pa_layout_pages(card->front, strlen(card->front), width, 4,
-                           glyph_width, NULL, pages) != 0 &&
-           pa_layout_pages(card->back, strlen(card->back), width, 4,
-                           glyph_width, NULL, pages) != 0;
+    return pa_layout_pages(text, strlen(text), BSP_LCD_W - 36, 4, glyph_width, NULL, pages) != 0;
 }
 
-static bool validate_import_card(const pa_card *card, void *user) {
+static bool text_supported(const char *deck, const char *front, const char *back, void *user) {
     (void)user;
-    return card_supported(card);
+    if ((++glyph_checks & 127u) == 0) {
+        vTaskDelay(1);
+    }
+    return text_fits(deck) && text_fits(front) && text_fits(back);
 }
 
 static size_t pages_for(const char *text, pa_text_page pages[PA_LAYOUT_MAX_PAGES]) {
-    return pa_layout_pages(text, strlen(text), BSP_LCD_W - 36, 4,
-                           glyph_width, NULL, pages);
+    return pa_layout_pages(text, strlen(text), BSP_LCD_W - 36, 4, glyph_width, NULL, pages);
 }
 
-static void collect_decks(void) {
-    deck_count = 0;
-    for (uint16_t i = 0; i < live.count; ++i) {
-        bool found = false;
-        for (uint16_t j = 0; j < deck_count; ++j)
-            if (strcmp(live.cards[i].deck, deck_names[j]) == 0) { found = true; break; }
-        if (!found && deck_count < PA_MAX_CARDS)
-            strcpy(deck_names[deck_count++], live.cards[i].deck);
-    }
-    if (deck_index >= deck_count) deck_index = deck_count ? deck_count - 1 : 0;
-}
+static uint16_t deck_count(void) { return pa_store_deck_count(&store); }
 
 static const char *deck_selected(void) {
-    return deck_index < deck_count ? deck_names[deck_index] : NULL;
+    return pa_store_deck_name(&store, deck_index);
+}
+
+static void clamp_deck_index(void) {
+    uint16_t count = deck_count();
+    if (deck_index > count) {
+        deck_index = count;
+    }
 }
 
 static const char *rating_name(pa_rating rating) {
@@ -135,40 +138,42 @@ static const char *rating_name(pa_rating rating) {
     return rating <= PA_EASY ? names[rating] : "Good";
 }
 
+static bool load_current_card(void) {
+    return pa_store_read(&store, session.current, card_deck, sizeof(card_deck), card_front,
+                         sizeof(card_front), card_back, sizeof(card_back));
+}
+
 static void render(void) {
     if (!title_label || !body_label || !footer_label || !bsp_lvgl_lock(100)) return;
     char title[96], body[PA_LINE_MAX + 1], footer[160];
-    snprintf(title, sizeof(title), "Anki  学习日 %" PRIu32, live.now / 1440U);
+    uint32_t day = pa_store_now(&store) / 1440U;
+    snprintf(title, sizeof(title), "Anki  学习日 %" PRIu32, day);
     body[0] = '\0';
     snprintf(footer, sizeof(footer), "UP/DOWN 选择   OK 确认");
+    uint16_t count = deck_count();
     if (ui == UI_DECKS) {
-        if (deck_count == 0) {
-            snprintf(body, sizeof(body), "还没有牌组\n通过 USB 导入 TSV\n\n学习日：%" PRIu32,
-                     live.now / 1440U);
+        if (count == 0) {
+            snprintf(body, sizeof(body), "还没有牌组\n通过 USB 导入 TSV\n\n学习日：%" PRIu32, day);
             snprintf(footer, sizeof(footer), "OK可推进学习日；长按返回");
-        } else if (deck_index == deck_count) {
-            snprintf(body, sizeof(body), "推进到下一学习日？\n\n当前学习日：%" PRIu32,
-                     live.now / 1440U);
+        } else if (deck_index == count) {
+            snprintf(body, sizeof(body), "推进到下一学习日？\n\n当前学习日：%" PRIu32, day);
             snprintf(footer, sizeof(footer), "UP/DOWN选择   OK确认推进");
         } else {
             snprintf(body, sizeof(body), "%s\n牌组 %u/%u\nOK 开始复习",
-                     deck_count ? deck_selected() : "还没有牌组",
-                     deck_count ? deck_index + 1 : 0, deck_count);
-            if (deck_count == 0) snprintf(footer, sizeof(footer), "连接电脑后导入 TSV 牌组");
+                     deck_selected() ? deck_selected() : "还没有牌组", deck_index + 1, count);
         }
     } else if (ui == UI_QUESTION || ui == UI_ANSWER || ui == UI_RATING) {
-        const pa_card *card = &live.cards[session.current];
-        const char *text = ui == UI_QUESTION ? card->front : card->back;
+        const char *text = ui == UI_QUESTION ? card_front : card_back;
         pa_text_page pages[PA_LAYOUT_MAX_PAGES];
-        size_t count = pages_for(text, pages);
+        size_t pages_count = pages_for(text, pages);
         uint16_t page = ui == UI_QUESTION ? question_page : answer_page;
-        if (!count) {
+        if (!pages_count) {
             snprintf(title, sizeof(title), "字体缺字");
             snprintf(body, sizeof(body), "这张卡含有当前字体不支持的文字。需重新导入受支持的牌组。");
             snprintf(footer, sizeof(footer), "长按 OK 返回");
             goto draw_labels;
         }
-        if (page >= count) page = 0;
+        if (page >= pages_count) page = 0;
         if (!pa_layout_format_page(text, strlen(text), pages[page], BSP_LCD_W - 36,
                                    glyph_width, NULL, body, sizeof(body))) {
             snprintf(title, sizeof(title), "字体缺字");
@@ -176,16 +181,16 @@ static void render(void) {
             snprintf(footer, sizeof(footer), "长按 OK 返回");
             goto draw_labels;
         }
-        snprintf(title, sizeof(title), "%s", card->deck);
+        snprintf(title, sizeof(title), "%s", card_deck);
         if (ui == UI_QUESTION) snprintf(footer, sizeof(footer), "D%" PRIu32 " C%u/%u Q%u/%u UP/DOWN 翻面OK",
-                                        live.now / 1440U, session.current + 1, live.count,
-                                        page + 1, (unsigned)count);
+                                        day, session.current + 1, pa_store_count(&store),
+                                        page + 1, (unsigned)pages_count);
         else if (ui == UI_ANSWER) snprintf(footer, sizeof(footer), "D%" PRIu32 " C%u/%u A%u/%u UP/DOWN 评分OK",
-                                          live.now / 1440U, session.current + 1, live.count,
-                                          page + 1, (unsigned)count);
+                                          day, session.current + 1, pa_store_count(&store),
+                                          page + 1, (unsigned)pages_count);
         else if (grade_save_failed) snprintf(footer, sizeof(footer), "存档失败；OK重试  长按返回");
         else snprintf(footer, sizeof(footer), "%s  D%" PRIu32 " C%u/%u UP/DOWN 保存OK",
-                      rating_name(selected_rating), live.now / 1440U, session.current + 1, live.count);
+                      rating_name(selected_rating), day, session.current + 1, pa_store_count(&store));
     } else if (ui == UI_EMPTY) {
         snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n可推进学习日。",
                  deck_selected() ? deck_selected() : "全部");
@@ -195,13 +200,13 @@ static void render(void) {
                  confirming_day ? "确认" : "取消");
         snprintf(footer, sizeof(footer), "UP/DOWN选择  OK执行  长按返回");
     } else if (ui == UI_IMPORTING) {
-        snprintf(body, sizeof(body), "正在导入牌组\n已接收 %u / %u 张\n长按 OK 可取消。",
-                 import_tx.received, import_tx.expected);
+        snprintf(body, sizeof(body), "正在导入牌组\n已接收 %" PRIu32 " / %" PRIu32 " 字节\n长按 OK 可取消。",
+                 store.import_durable + store.import_asm, store.import_length);
         snprintf(footer, sizeof(footer), "请保持 USB 连接");
     } else {
         snprintf(body, sizeof(body), "存档或设备错误\n%s\n长按 OK 返回。", last_error);
         snprintf(footer, sizeof(footer), storage_corrupt ? "需显式导入新牌组" :
-                 (!storage_ready ? "NVS 初始化失败；未擦除" : ""));
+                 (!storage_ready ? "卡片分区不可用；未擦除 NVS" : ""));
     }
 draw_labels:
     lv_label_set_text(title_label, title);
@@ -211,7 +216,7 @@ draw_labels:
 }
 
 static void abort_import(void) {
-    pa_import_abort(&import_tx);
+    pa_store_import_abort(&store);
     if (ui == UI_IMPORTING) ui = UI_DECKS;
 }
 
@@ -222,43 +227,65 @@ static void handle_line(char *line) {
     if (!pa_protocol_parse(line, strlen(line), &command)) { reply_error("COMMAND"); return; }
     switch (command.kind) {
     case PA_PROTOCOL_INFO:
-        printf("OK INFO version=1 cards=%u day=%" PRIu32 "\n", live.count, live.now / 1440U);
+        printf("OK INFO version=%u cards=%u day=%" PRIu32 " cap=%u\n", PA_PROTOCOL_VERSION,
+               pa_store_count(&store), pa_store_now(&store) / 1440U, PA_STORE_MAX_CARDS);
         fflush(stdout);
         return;
-    case PA_PROTOCOL_BEGIN:
-        if (import_tx.active) { reply_error("TRANSACTION"); return; }
+    case PA_PROTOCOL_BEGIN: {
+        if (store.import_active) { reply_error("TRANSACTION"); return; }
         if (!storage_ready) { reply_error("STORAGE"); return; }
-        if (!pa_import_begin(&import_tx, &staging, &live, (uint16_t)command.value)) { reply_error("TRANSACTION"); return; }
+        uint32_t resume = 0;
+        if (!pa_store_import_begin(&store, command.value, command.crc, command.length, &resume)) {
+            reply_error("TRANSACTION");
+            return;
+        }
+        session.current = PA_NO_CARD;
+        session.revealed = false;
         import_last_input = esp_timer_get_time();
         ui = UI_IMPORTING;
         render();
-        printf("OK BEGIN\n");
+        printf("OK BEGIN resume=%" PRIu32 "\n", resume);
         fflush(stdout);
         return;
-    case PA_PROTOCOL_CARD:
-        if (!import_tx.active || import_tx.invalid) { reply_error("TRANSACTION"); return; }
+    }
+    case PA_PROTOCOL_CHUNK: {
+        if (!store.import_active) { reply_error("TRANSACTION"); return; }
         import_last_input = esp_timer_get_time();
-        if (!pa_import_add(&import_tx, &staging, command.id, command.deck, command.front,
-                           command.back, validate_import_card, NULL)) {
-            reply_error("CARD");
+        uint32_t accepted = 0;
+        if (!pa_store_import_write(&store, command.value, command.chunk, command.length, &accepted)) {
+            reply_error("STORAGE");
             render();
             return;
         }
         render();
-        printf("OK CARD\n");
+        printf("OK CHUNK %" PRIu32 "\n", accepted);
         fflush(stdout);
         return;
+    }
+    case PA_PROTOCOL_RESUME: {
+        uint32_t offset = 0, count = 0, crc = 0, length = 0;
+        if (!pa_store_import_resume(&store, &offset, &count, &crc, &length)) {
+            reply_error("TRANSACTION");
+            return;
+        }
+        printf("OK RESUME offset=%" PRIu32 " count=%" PRIu32 " crc=%" PRIu32 " length=%" PRIu32 "\n",
+               offset, count, crc, length);
+        fflush(stdout);
+        return;
+    }
     case PA_PROTOCOL_COMMIT:
-        if (!import_tx.active || import_tx.invalid || import_tx.received != import_tx.expected) { reply_error("TRANSACTION"); return; }
-        if (!pa_import_commit(&import_tx, &staging, &live,
-                              persist_import, NULL)) {
+        if (!store.import_active || store.import_durable + store.import_asm != store.import_length) {
+            reply_error("TRANSACTION");
+            return;
+        }
+        if (!pa_store_import_commit(&store, text_supported, NULL)) {
             reply_error("STORAGE");
             ui = storage_corrupt ? UI_ERROR : UI_DECKS;
             render();
             return;
         }
         storage_corrupt = false;
-        collect_decks();
+        clamp_deck_index();
         ui = UI_DECKS;
         printf("OK COMMIT\n");
         fflush(stdout);
@@ -273,16 +300,24 @@ static void handle_line(char *line) {
         return;
     case PA_PROTOCOL_DAY: {
         const uint32_t day = command.value;
-        if (storage_corrupt || import_tx.active || day < live.now / 1440U || day > UINT32_MAX / 1440U) { reply_error("DAY"); return; }
-        staging = live;
+        uint32_t now = pa_store_now(&store);
+        if (storage_corrupt || store.import_active || day < now / 1440U || day > UINT32_MAX / 1440U) {
+            reply_error("DAY");
+            return;
+        }
         const uint32_t target = day * 1440U;
-        if (target > staging.now && !pa_advance(&staging, target - staging.now)) { reply_error("DAY"); return; }
-        if (!collection_save_then_swap(&staging)) { reply_error("STORAGE"); return; }
+        if ((target > now && !pa_store_advance(&store, target - now)) || !pa_store_checkpoint(&store)) {
+            reply_error("STORAGE");
+            return;
+        }
         printf("OK DAY\n");
         fflush(stdout);
         render();
         return;
     }
+    case PA_PROTOCOL_CARD:
+        reply_error("COMMAND");
+        return;
     }
     reply_error("COMMAND");
 }
@@ -320,21 +355,19 @@ static void clock_callback(void *arg) {
 
 static void begin_deck(void) {
     if (storage_corrupt) { ui = UI_ERROR; return; }
-    pa_begin(&session, &live, deck_selected());
-    if (session.current == PA_NO_CARD) ui = UI_EMPTY;
-    else { ui = UI_QUESTION; question_page = answer_page = 0; }
+    session.current = pa_store_next(&store, deck_selected());
+    session.revealed = false;
+    if (session.current == PA_NO_CARD) { ui = UI_EMPTY; return; }
+    if (!load_current_card()) { ui = UI_ERROR; last_error = "无法读取卡片"; return; }
+    ui = UI_QUESTION;
+    question_page = answer_page = 0;
 }
 
 static void do_grade(void) {
     if (session.current == PA_NO_CARD || !session.revealed) return;
-    const uint16_t current = session.current;
-    pa_card old = live.cards[current];
-    const pa_session old_session = session;
-    if (!pa_grade(&live, &session, selected_rating)) {
-        live.cards[current] = old; session = old_session; grade_save_failed = true; return;
-    }
-    if (!persist(&live)) {
-        live.cards[current] = old; session = old_session; grade_save_failed = true; return;
+    if (!pa_store_grade(&store, session.current, selected_rating)) {
+        grade_save_failed = true;
+        return;
     }
     grade_save_failed = false;
     begin_deck();
@@ -343,7 +376,7 @@ static void do_grade(void) {
 static void process_button(const event_t *event) {
     const bool long_press = event->button_event == BSP_BTN_LONG;
     if (long_press && event->button == BSP_BTN_OK) {
-        if (import_tx.active) { abort_import(); ui = storage_corrupt ? UI_ERROR : UI_DECKS; }
+        if (store.import_active) { abort_import(); ui = storage_corrupt ? UI_ERROR : UI_DECKS; }
         else if (ui == UI_ERROR && (storage_corrupt || !storage_ready)) {
             /* Keep unrecoverable storage failures visible without changing data. */
         }
@@ -354,28 +387,27 @@ static void process_button(const event_t *event) {
         render(); return;
     }
     if (long_press) return;
+    uint16_t count = deck_count();
     if (ui == UI_DECKS) {
-        const uint16_t entries = deck_count + 1;
-        if (event->button == BSP_BTN_UP) deck_index = (deck_index + entries - 1) % entries;
-        else if (event->button == BSP_BTN_DOWN) deck_index = (deck_index + 1) % entries;
-        else if (deck_index == deck_count) { confirming_day = true; ui = UI_CONFIRM_DAY; }
+        const uint16_t entries = count + 1;
+        if (event->button == BSP_BTN_UP) deck_index = (uint16_t)((deck_index + entries - 1) % entries);
+        else if (event->button == BSP_BTN_DOWN) deck_index = (uint16_t)((deck_index + 1) % entries);
+        else if (deck_index == count) { confirming_day = true; ui = UI_CONFIRM_DAY; }
         else begin_deck();
     } else if (ui == UI_CONFIRM_DAY) {
         if (event->button == BSP_BTN_UP || event->button == BSP_BTN_DOWN) confirming_day = !confirming_day;
         else if (!confirming_day) ui = UI_DECKS;
-        else {
-            staging = live;
-            if (staging.now > UINT32_MAX - 1440U || !pa_advance(&staging, 1440U) || !collection_save_then_swap(&staging)) {
-                ui = UI_ERROR; last_error = "学习日无法保存";
-            } else { confirming_day = false; ui = UI_DECKS; }
-        }
+        else if (pa_store_now(&store) > UINT32_MAX - 1440U || !pa_store_advance(&store, 1440U) ||
+                 !pa_store_checkpoint(&store)) {
+            ui = UI_ERROR; last_error = "学习日无法保存";
+        } else { confirming_day = false; ui = UI_DECKS; }
     } else if (ui == UI_QUESTION || ui == UI_ANSWER) {
-        const char *text = ui == UI_QUESTION ? live.cards[session.current].front : live.cards[session.current].back;
-        pa_text_page pages[PA_LAYOUT_MAX_PAGES]; size_t count = pages_for(text, pages);
+        const char *text = ui == UI_QUESTION ? card_front : card_back;
+        pa_text_page pages[PA_LAYOUT_MAX_PAGES]; size_t pages_count = pages_for(text, pages);
         uint16_t *page = ui == UI_QUESTION ? &question_page : &answer_page;
         if (event->button == BSP_BTN_UP && *page > 0) --*page;
-        else if (event->button == BSP_BTN_DOWN && *page + 1 < count) ++*page;
-        else if (event->button == BSP_BTN_OK && ui == UI_QUESTION) { if (pa_flip(&session)) { ui = UI_ANSWER; answer_page = 0; } }
+        else if (event->button == BSP_BTN_DOWN && *page + 1 < pages_count) ++*page;
+        else if (event->button == BSP_BTN_OK && ui == UI_QUESTION) { ui = UI_ANSWER; answer_page = 0; session.revealed = true; }
         else if (event->button == BSP_BTN_OK) { ui = UI_RATING; selected_rating = PA_GOOD; }
     } else if (ui == UI_RATING) {
         if (event->button == BSP_BTN_UP) selected_rating = (pa_rating)((selected_rating + 3) % 4);
@@ -392,19 +424,18 @@ static void app_task(void *arg) {
         if (xQueueReceive(events, &event, portMAX_DELAY) != pdTRUE) continue;
         if (event.type == EVENT_BUTTON) process_button(&event);
         else if (event.type == EVENT_LINE) {
-            char *line = event.line;
-            handle_line(line);
+            handle_line(event.line);
             if (ui != UI_ERROR && ui != UI_IMPORTING) render();
         } else if (event.type == EVENT_TICK) {
             int64_t now = esp_timer_get_time();
-            if (import_tx.active && now - import_last_input >= IMPORT_TIMEOUT_US) {
+            if (store.import_active && now - import_last_input >= IMPORT_TIMEOUT_US) {
                 abort_import(); ui = storage_corrupt ? UI_ERROR : UI_DECKS; reply_error("TIMEOUT"); render();
-            } else if (storage_ready && !storage_corrupt) {
+            } else if (storage_ready && !storage_corrupt && !store.import_active) {
                 uint32_t elapsed = (uint32_t)((now - last_clock_us) / MINUTE_US);
-                if (elapsed && pa_advance(&live, elapsed)) {
+                if (elapsed && pa_store_advance(&store, elapsed)) {
                     last_clock_us += (int64_t)elapsed * MINUTE_US;
-                    if (now - last_checkpoint >= 5 * MINUTE_US && persist(&live)) last_checkpoint = now;
-                    if (ui == UI_EMPTY && pa_next(&live, deck_selected()) != PA_NO_CARD) begin_deck();
+                    if (now - last_checkpoint >= 5 * MINUTE_US && pa_store_checkpoint(&store)) last_checkpoint = now;
+                    if (ui == UI_EMPTY && pa_store_next(&store, deck_selected()) != PA_NO_CARD) begin_deck();
                     render();
                 }
             }
@@ -412,15 +443,54 @@ static void app_task(void *arg) {
     }
 }
 
+static void migrate_legacy_snapshot(void) {
+    if (!nvs_ready || pa_store_mount(&store) != PA_STORE_EMPTY) {
+        return;
+    }
+    size_t size = 0;
+    if (nvs_get_blob(nvs, "snapshot", NULL, &size) != ESP_OK || size == 0 || size > PA_SNAPSHOT_MAX) {
+        return;
+    }
+    uint8_t *blob = malloc(size);
+    if (blob == NULL) {
+        return;
+    }
+    if (nvs_get_blob(nvs, "snapshot", blob, &size) == ESP_OK && pa_store_migrate_pak1(&store, blob, size)) {
+        if (nvs_erase_key(nvs, "snapshot") == ESP_OK) {
+            (void)nvs_commit(nvs);
+        }
+        ESP_LOGI(TAG, "migrated legacy PAK1 snapshot");
+    } else {
+        ESP_LOGW(TAG, "legacy PAK1 snapshot was not migrated");
+    }
+    free(blob);
+}
+
 void app_main(void) {
     ESP_ERROR_CHECK(bsp_power_wait_for_wake_release());
     esp_err_t err = nvs_flash_init();
     if (err == ESP_OK) err = nvs_open("pa_anki", NVS_READWRITE, &nvs);
-    if (err == ESP_OK) {
-        storage_ready = true;
-        if (!load_snapshot()) { storage_corrupt = true; last_error = "存档损坏或无法读取"; }
-    } else { last_error = "NVS 初始化失败；未擦除任何数据"; }
-    collect_decks();
+    nvs_ready = err == ESP_OK;
+    if (!nvs_ready) {
+        ESP_LOGE(TAG, "NVS init failed; flash was not erased");
+    }
+    storage_ready = open_partition(&cards_flash, "cards", PA_CARDS_PARTITION_SIZE) &&
+                    open_partition(&sched_flash, "sched", PA_SCHED_PARTITION_SIZE);
+    if (storage_ready) {
+        pa_store_init(&store, &cards_flash, &sched_flash);
+        pa_store_status status = pa_store_mount(&store);
+        if (status == PA_STORE_EMPTY) {
+            migrate_legacy_snapshot();
+            status = store.status;
+        }
+        storage_corrupt = status == PA_STORE_CORRUPT;
+        if (storage_corrupt) last_error = "存档损坏或无法读取";
+    } else {
+        last_error = "卡片分区不可用；未擦除任何数据";
+    }
+    clamp_deck_index();
+    ESP_LOGI(TAG, "free heap %" PRIu32 " bytes; pa_store %u bytes; cards %u",
+             (uint32_t)esp_get_free_heap_size(), (unsigned)sizeof(pa_store), pa_store_count(&store));
     ESP_ERROR_CHECK(bsp_display_init());
     lv_display_t *display = bsp_lvgl_init();
     if (!display) { ESP_LOGE(TAG, "LVGL initialization failed"); return; }
@@ -453,7 +523,7 @@ void app_main(void) {
     if (!events) { ESP_LOGE(TAG, "event queue allocation failed"); return; }
     ESP_ERROR_CHECK(bsp_button_init(button_callback, NULL));
     if (xTaskCreate(console_reader, "anki_usb", 4096, NULL, 4, NULL) != pdPASS ||
-        xTaskCreate(app_task, "anki_app", 12288, NULL, 5, NULL) != pdPASS) {
+        xTaskCreate(app_task, "anki_app", 16384, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "app task creation failed");
         return;
     }
@@ -461,6 +531,7 @@ void app_main(void) {
     const esp_timer_create_args_t timer_args = {.callback = clock_callback, .name = "anki_clock"};
     ESP_ERROR_CHECK(esp_timer_create(&timer_args, &clock));
     last_clock_us = esp_timer_get_time();
+    last_checkpoint = last_clock_us;
     ESP_ERROR_CHECK(esp_timer_start_periodic(clock, MINUTE_US));
     if (storage_corrupt || !storage_ready) ui = UI_ERROR;
     render();

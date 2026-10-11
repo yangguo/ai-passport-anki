@@ -48,15 +48,21 @@ def run_sim_bytes(*args, commands=b""):
     )
 
 
-def card_command(card_id, deck, front, back):
-    fields = (deck, front, back)
-    encoded = [value.encode("utf-8").hex() for value in fields]
-    return f"CARD {card_id} {' '.join(encoded)}\n"
-
-
 def import_commands(cards):
-    commands = [f"BEGIN {len(cards)}\n"]
-    commands.extend(card_command(*card) for card in cards)
+    import struct
+    import zlib
+
+    payload = b""
+    for card_id, deck, front, back in cards:
+        deck_b, front_b, back_b = deck.encode(), front.encode(), back.encode()
+        payload += struct.pack("<IBHH", card_id, len(deck_b), len(front_b), len(back_b)) + deck_b + front_b + back_b
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    commands = [f"BEGIN {len(cards)} {crc} {len(payload)}\n"]
+    offset = 0
+    while offset < len(payload):
+        chunk = payload[offset:offset + 480]
+        commands.append(f"CHUNK {offset} {chunk.hex()}\n")
+        offset += len(chunk)
     commands.append("COMMIT\n")
     return "".join(commands)
 
@@ -80,7 +86,7 @@ def test_import_review_requires_flip_and_restores_snapshot(tmp_path):
     restarted = run_sim("--state", snapshot, commands="INFO\nDECK 中文 词汇\nNEXT\nQUIT\n")
 
     assert restarted.returncode == 0, restarted.stderr
-    assert "OK INFO version=1 cards=2 day=0" in restarted.stdout
+    assert "OK INFO version=2 cards=2 day=0" in restarted.stdout
     assert "今天没有到期卡片" in restarted.stdout
 
 
@@ -152,8 +158,8 @@ def test_day_advance_and_no_due_cards(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "OK DAY" in result.stdout
-    assert "OK INFO version=1 cards=1 day=2" in result.stdout
-    assert f"OK INFO version=1 cards=1 day={max_day}" in result.stdout
+    assert "OK INFO version=2 cards=1 day=2" in result.stdout
+    assert f"OK INFO version=2 cards=1 day={max_day}" in result.stdout
     assert result.stdout.count("今天没有到期卡片") == 2
     assert "OK ADVANCE now=2885" in result.stdout
     assert "ERR DAY" in result.stdout
@@ -166,9 +172,9 @@ def test_without_state_path_keeps_collection_in_memory():
 
     assert first.returncode == 0, first.stderr
     assert "OK COMMIT" in first.stdout
-    assert "OK INFO version=1 cards=1 day=0" in first.stdout
+    assert "OK INFO version=2 cards=1 day=0" in first.stdout
     assert restarted.returncode == 0, restarted.stderr
-    assert "OK INFO version=1 cards=0 day=0" in restarted.stdout
+    assert "OK INFO version=2 cards=0 day=0" in restarted.stdout
 
 
 @pytest.mark.parametrize(
@@ -196,6 +202,15 @@ def test_each_rating_persists_core_due_time(tmp_path, rating, delay_minutes):
     assert "正面：Front" in restarted.stdout
 
 
+def test_imports_10000_cards_in_memory():
+    cards = [(index, f"D{index % 10}", "Q", "A") for index in range(1, 10001)]
+    result = run_sim(commands=import_commands(cards) + "INFO\nDECK D1\nNEXT\nQUIT\n")
+
+    assert result.returncode == 0, result.stderr
+    assert "OK INFO version=2 cards=10000 day=0" in result.stdout
+    assert "正面：Q" in result.stdout
+
+
 def test_binary_input_rejects_nul_internal_cr_and_recovers_after_long_line():
     commands = (
         import_commands([(1, "Deck", "Front", "Back")]).encode()
@@ -211,5 +226,5 @@ def test_binary_input_rejects_nul_internal_cr_and_recovers_after_long_line():
     assert "ERR LINE" in output
     assert "背面：Back" in output
     assert "已评分：Good" in output
-    assert "OK INFO version=1 cards=1 day=0" in output
+    assert "OK INFO version=2 cards=1 day=0" in output
     assert output.endswith("再见。\n")
