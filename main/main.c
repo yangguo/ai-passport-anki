@@ -98,9 +98,9 @@ static bool card_supported(const pa_card *card) {
     const size_t width = BSP_LCD_W - 36;
     return pa_layout_pages(card->deck, strlen(card->deck), width, 4,
                            glyph_width, NULL, pages) != 0 &&
-           pa_layout_pages(card->front, strlen(card->front), width, 9,
+           pa_layout_pages(card->front, strlen(card->front), width, 4,
                            glyph_width, NULL, pages) != 0 &&
-           pa_layout_pages(card->back, strlen(card->back), width, 9,
+           pa_layout_pages(card->back, strlen(card->back), width, 4,
                            glyph_width, NULL, pages) != 0;
 }
 
@@ -136,7 +136,7 @@ static const char *rating_name(pa_rating rating) {
 }
 
 static void render(void) {
-    if (!bsp_lvgl_lock(100)) return;
+    if (!title_label || !body_label || !footer_label || !bsp_lvgl_lock(100)) return;
     char title[96], body[LINE_MAX + 1], footer[160];
     snprintf(title, sizeof(title), "Anki  学习日 %" PRIu32, live.now / 1440U);
     body[0] = '\0';
@@ -165,10 +165,13 @@ static void render(void) {
             goto draw_labels;
         }
         if (page >= count) page = 0;
-        size_t n = pages[page].length;
-        if (n >= sizeof(body)) n = sizeof(body) - 1;
-        memcpy(body, text + pages[page].start, n);
-        body[n] = '\0';
+        if (!pa_layout_format_page(text, strlen(text), pages[page], BSP_LCD_W - 36,
+                                   glyph_width, NULL, body, sizeof(body))) {
+            snprintf(title, sizeof(title), "字体缺字");
+            snprintf(body, sizeof(body), "这张卡含有当前字体不支持的文字。需重新导入受支持的牌组。");
+            snprintf(footer, sizeof(footer), "长按 OK 返回");
+            goto draw_labels;
+        }
         snprintf(title, sizeof(title), "%s", card->deck);
         if (ui == UI_QUESTION) snprintf(footer, sizeof(footer), "D%" PRIu32 " C%u/%u Q%u/%u UP/DOWN 翻面OK",
                                         live.now / 1440U, session.current + 1, live.count,
@@ -183,8 +186,9 @@ static void render(void) {
                  deck_selected() ? deck_selected() : "全部");
         snprintf(footer, sizeof(footer), "OK重新检查   长按返回牌组");
     } else if (ui == UI_CONFIRM_DAY) {
-        snprintf(body, sizeof(body), "将学习日推进一天？\n\n这不会修改设备的真实日期。");
-        snprintf(footer, sizeof(footer), "UP/DOWN选择  OK确认  长按取消");
+        snprintf(body, sizeof(body), "推进学习日 +1？\n\n当前选择：%s\n设备时间保持不变。",
+                 confirming_day ? "确认" : "取消");
+        snprintf(footer, sizeof(footer), "UP/DOWN选择  OK执行  长按返回");
     } else if (ui == UI_IMPORTING) {
         snprintf(body, sizeof(body), "正在导入牌组\n已接收 %u / %u 张\n长按 OK 可取消。",
                  import_tx.received, import_tx.expected);
@@ -407,7 +411,11 @@ void app_main(void) {
     ESP_ERROR_CHECK(bsp_display_init());
     lv_display_t *display = bsp_lvgl_init();
     if (!display) { ESP_LOGE(TAG, "LVGL initialization failed"); return; }
-    if (bsp_lvgl_lock(1000)) {
+    if (!bsp_lvgl_lock(1000)) {
+        ESP_LOGE(TAG, "LVGL lock unavailable during screen creation");
+        return;
+    }
+    {
         lv_obj_t *screen = lv_screen_active();
         lv_obj_set_style_bg_color(screen, lv_color_hex(0x101820), 0);
         title_label = lv_label_create(screen); lv_obj_set_pos(title_label, 18, 30); lv_obj_set_size(title_label, 204, 62);
@@ -416,7 +424,7 @@ void app_main(void) {
         lv_obj_set_style_text_font(title_label, &pa_font_16, 0);
         lv_obj_set_style_text_color(title_label, lv_color_hex(0xf3f4f6), 0);
         body_label = lv_label_create(screen); lv_obj_set_pos(body_label, 18, 96); lv_obj_set_size(body_label, 204, 124);
-        lv_label_set_long_mode(body_label, LV_LABEL_LONG_WRAP); lv_obj_set_style_text_font(body_label, &pa_font_16, 0);
+        lv_label_set_long_mode(body_label, LV_LABEL_LONG_CLIP); lv_obj_set_style_text_font(body_label, &pa_font_16, 0);
         lv_obj_set_style_text_line_space(body_label, 0, 0);
         lv_obj_set_style_text_color(body_label, lv_color_hex(0xf3f4f6), 0);
         footer_label = lv_label_create(screen); lv_obj_set_pos(footer_label, 18, 224); lv_obj_set_size(footer_label, 204, 62);

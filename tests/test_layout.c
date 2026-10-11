@@ -16,6 +16,13 @@ int main(void) {
     assert(count == 2);
     assert(pages[0].start == 0 && pages[0].length == 4);
     assert(pages[1].start == 4 && pages[1].length == 5);
+    char rendered[32];
+    assert(pa_layout_format_page(text, strlen(text), pages[0], 2, width, NULL,
+                                 rendered, sizeof(rendered)));
+    assert(strcmp(rendered, "A\n中") == 0);
+    assert(pa_layout_format_page(text, strlen(text), pages[1], 2, width, NULL,
+                                 rendered, sizeof(rendered)));
+    assert(strcmp(rendered, "文\nBC") == 0);
 
     const char invalid[] = { (char)0xe4, (char)0xb8, 0 };
     assert(pa_layout_pages(invalid, sizeof(invalid), 8, 2, width, NULL, pages) == 0);

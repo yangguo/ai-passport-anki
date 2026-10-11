@@ -1,6 +1,7 @@
 #ifndef PA_LAYOUT_H
 #define PA_LAYOUT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -13,5 +14,8 @@ typedef struct { uint16_t start, length; } pa_text_page;
 size_t pa_layout_pages(const char *text, size_t length, uint16_t width,
                        uint8_t lines_per_page, pa_glyph_width_fn glyph_width,
                        void *user, pa_text_page pages[PA_LAYOUT_MAX_PAGES]);
+bool pa_layout_format_page(const char *text, size_t length, pa_text_page page,
+                           uint16_t width, pa_glyph_width_fn glyph_width,
+                           void *user, char *out, size_t out_capacity);
 
 #endif

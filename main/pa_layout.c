@@ -1,5 +1,7 @@
 #include "pa_layout.h"
 
+#include <stdbool.h>
+
 static int next_utf8(const unsigned char *s, size_t n, size_t *at, uint32_t *out) {
     if (*at >= n) return 0;
     const size_t i = *at;
@@ -59,4 +61,37 @@ size_t pa_layout_pages(const char *text, size_t length, uint16_t width,
     pages[page_count++] = (pa_text_page){(uint16_t)page_start,
                                          (uint16_t)(length - page_start)};
     return page_count;
+}
+
+bool pa_layout_format_page(const char *text, size_t length, pa_text_page page,
+                           uint16_t width, pa_glyph_width_fn glyph_width,
+                           void *user, char *out, size_t out_capacity) {
+    if (!text || !width || !glyph_width || !out || !out_capacity ||
+        (size_t)page.start + page.length > length) return false;
+    size_t at = page.start, end = (size_t)page.start + page.length, written = 0;
+    uint32_t line_width = 0;
+    while (at < end) {
+        size_t char_start = at;
+        uint32_t cp;
+        if (next_utf8((const unsigned char *)text, end, &at, &cp) <= 0) return false;
+        uint16_t glyph = cp == '\n' ? 0 : glyph_width(cp, user);
+        if (cp != '\n' && glyph == 0) return false;
+        if (cp == '\n') {
+            if (written + 1 >= out_capacity) return false;
+            out[written++] = '\n';
+            line_width = 0;
+            continue;
+        }
+        if (line_width && line_width + glyph > width) {
+            if (written + 1 >= out_capacity) return false;
+            out[written++] = '\n';
+            line_width = 0;
+        }
+        size_t bytes = at - char_start;
+        if (written + bytes >= out_capacity) return false;
+        for (size_t i = 0; i < bytes; ++i) out[written++] = text[char_start + i];
+        line_width += glyph;
+    }
+    out[written] = '\0';
+    return true;
 }
