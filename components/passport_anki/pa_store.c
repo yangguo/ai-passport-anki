@@ -7,13 +7,20 @@
 #define PA_PROGRESS_MAGIC "PIM1"
 #define PA_SLOT_MAGIC "PCT1"
 #define PA_CHUNK_MAGIC "PSCH"
+#define PA_REVLOG_MAGIC "PRLG"
+#define PA_EXPORT_MAGIC "PREV"
 #define PA_NONE 0xffffu
 
 _Static_assert(PA_SCHED_PER_CHUNK == 203u, "schedule chunk capacity");
 _Static_assert(PA_SCHED_CHUNKS == 60u, "schedule chunk count");
+_Static_assert(PA_REVLOG_PER_SECTOR == 508u, "review log records per sector");
+_Static_assert(PA_REVLOG_MAX == 24384u, "review log capacity");
+_Static_assert(PA_SCHED_POOL_SECTORS == 156u, "scheduling pool after the review log");
+_Static_assert(PA_SCHED_POOL_SECTORS >= PA_SCHED_CHUNKS * 2u, "import needs old and new chunks");
 _Static_assert(PA_PAYLOAD_OFF % PA_STORE_SECTOR == 0u, "payload alignment");
 _Static_assert(sizeof(pa_store) <= PA_STORE_RAM_BUDGET, "pa_store exceeds the RAM budget");
 _Static_assert(PA_STORE_PAYLOAD_MAX > 1500u * 1024u, "card payload room");
+_Static_assert(PA_EXPORT_SCHED == PA_SCHED_RECORD, "export copies the on-flash schedule record");
 
 static size_t heap_used;
 static size_t heap_hwm;
@@ -143,7 +150,7 @@ static bool write_super(pa_store *store)
     block[20] = store->active_slot;
     block[21] = (uint8_t)store->deck_count;
     wr_u16(block + 22, 0);
-    wr_u32(block + 24, 0);
+    wr_u32(block + 24, store->revlog_dropped);
     wr_u32(block + 28, pa_crc32(block, 28));
     uint8_t target = store->super_generation == 0 ? 0u : (uint8_t)(1u - store->super_slot);
     if (!flash_erase_write(store->sched, (uint32_t)target * PA_STORE_SECTOR, block, 32)) {
@@ -175,6 +182,7 @@ static bool read_super(pa_store *store, uint8_t slot, uint32_t *generation)
     store->epoch = rd_u32(block + 16);
     store->active_slot = block[20];
     store->deck_count = decks;
+    store->revlog_dropped = rd_u32(block + 24);
     *generation = rd_u32(block + 8);
     return *generation != 0;
 }
@@ -370,6 +378,9 @@ static bool load_progress(pa_store *store)
     return true;
 }
 
+static void load_revlog(pa_store *store);
+static bool revlog_append(pa_store *store, uint16_t card_index, uint8_t rating);
+
 void pa_store_init(pa_store *store, pa_flash *cards, pa_flash *sched)
 {
     memset(store, 0, sizeof(*store));
@@ -382,6 +393,11 @@ pa_store_status pa_store_mount(pa_store *store)
 {
     store->import_active = false;
     store->import_asm = 0;
+    store->export_active = false;
+    store->revlog_count = 0;
+    store->revlog_dropped = 0;
+    store->revlog_corrupt = false;
+    store->mutation = 0;
     store->status = PA_STORE_EMPTY;
     store->count = 0;
     store->now = 0;
@@ -393,21 +409,23 @@ pa_store_status pa_store_mount(pa_store *store)
     clear_chunk_map(store);
     if (store->cards == NULL || store->sched == NULL ||
         (store->cards->size % (PA_STORE_SECTOR * 2u)) != 0 || store->cards->size < PA_STORE_SECTOR * 2u ||
-        store->sched->size < (PA_META_SECTORS + PA_SCHED_CHUNKS + 1u) * PA_STORE_SECTOR ||
         (store->sched->size % PA_STORE_SECTOR) != 0) {
         store->status = PA_STORE_CORRUPT;
         return store->status;
     }
-    store->pool_count = (uint16_t)(store->sched->size / PA_STORE_SECTOR - PA_META_SECTORS);
-    if (store->pool_count > PA_POOL_CAP || payload_room(store) < 1024u) {
+    uint32_t sectors = store->sched->size / PA_STORE_SECTOR;
+    if (sectors < PA_META_SECTORS + PA_SCHED_CHUNKS * 2u + PA_REVLOG_SECTORS ||
+        sectors - PA_META_SECTORS - PA_REVLOG_SECTORS > PA_POOL_CAP || payload_room(store) < 1024u) {
         store->status = PA_STORE_CORRUPT;
         return store->status;
     }
+    store->pool_count = (uint16_t)(sectors - PA_META_SECTORS - PA_REVLOG_SECTORS);
     uint32_t gen0 = 0, gen1 = 0;
     bool ok0 = read_super(store, 0, &gen0);
     uint32_t now0 = store->now, epoch0 = store->epoch;
     uint16_t count0 = store->count, decks0 = store->deck_count;
     uint8_t slot0 = store->active_slot;
+    uint32_t dropped0 = store->revlog_dropped;
     bool ok1 = read_super(store, 1, &gen1);
     if (ok0 && (!ok1 || gen0 >= gen1)) {
         store->now = now0;
@@ -415,6 +433,7 @@ pa_store_status pa_store_mount(pa_store *store)
         store->count = count0;
         store->deck_count = decks0;
         store->active_slot = slot0;
+        store->revlog_dropped = dropped0;
         store->super_generation = gen0;
         store->super_slot = 0;
         store->status = PA_STORE_READY;
@@ -434,6 +453,9 @@ pa_store_status pa_store_mount(pa_store *store)
     }
     if (!load_progress(store) && store->status != PA_STORE_CORRUPT) {
         store->status = PA_STORE_CORRUPT;
+    }
+    if (store->status == PA_STORE_READY) {
+        load_revlog(store);
     }
     return store->status;
 }
@@ -478,7 +500,7 @@ static int deck_index(const pa_store *store, const char *deck)
     return -1;
 }
 
-static bool read_record(pa_store *store, uint16_t index, uint8_t out[PA_SCHED_RECORD])
+static bool read_record(const pa_store *store, uint16_t index, uint8_t out[PA_SCHED_RECORD])
 {
     if (index >= store->count) {
         return false;
@@ -669,7 +691,109 @@ bool pa_store_grade(pa_store *store, uint16_t index, pa_rating rating)
         return false;
     }
     store->chunk_phys[chunk] = dest;
+    if (!revlog_append(store, index, (uint8_t)rating) && store->revlog_dropped < UINT32_MAX) {
+        store->revlog_dropped++;
+    }
+    store->mutation++;
+    store->export_active = false;
     (void)write_super(store);
+    return true;
+}
+
+static bool revlog_sector_ok(const uint8_t *sector, uint32_t epoch, uint32_t expect_base, uint16_t *count)
+{
+    if (memcmp(sector, PA_REVLOG_MAGIC, 4) != 0 || rd_u32(sector + 4) != epoch ||
+        rd_u32(sector + 8) != expect_base || pa_crc32(sector, 28) != rd_u32(sector + 28)) {
+        return false;
+    }
+    uint16_t records = rd_u16(sector + 12);
+    if (records == 0 || records > PA_REVLOG_PER_SECTOR) {
+        return false;
+    }
+    if (pa_crc32(sector + PA_REVLOG_HEADER, (size_t)records * PA_REVLOG_RECORD) != rd_u32(sector + 16)) {
+        return false;
+    }
+    *count = records;
+    return true;
+}
+
+static void load_revlog(pa_store *store)
+{
+    store->revlog_count = 0;
+    store->revlog_corrupt = false;
+    if (store->epoch == 0) {
+        return;
+    }
+    uint32_t expect = 0;
+    for (uint16_t i = 0; i < PA_REVLOG_SECTORS; ++i) {
+        uint32_t offset = pool_offset((uint16_t)(store->pool_count + i));
+        if (!flash_read(store->sched, offset, store->sector, PA_STORE_SECTOR)) {
+            store->revlog_corrupt = true;
+            store->revlog_count = 0;
+            return;
+        }
+        if (memcmp(store->sector, "\xff\xff\xff\xff", 4) == 0) {
+            return;
+        }
+        uint16_t records = 0;
+        if (!revlog_sector_ok(store->sector, store->epoch, expect, &records)) {
+            if (expect == 0 && memcmp(store->sector, PA_REVLOG_MAGIC, 4) == 0 &&
+                rd_u32(store->sector + 4) != store->epoch) {
+                return;
+            }
+            store->revlog_corrupt = true;
+            store->revlog_count = 0;
+            return;
+        }
+        expect += records;
+        store->revlog_count = expect;
+        if (records < PA_REVLOG_PER_SECTOR) {
+            return;
+        }
+    }
+}
+
+static bool revlog_append(pa_store *store, uint16_t card_index, uint8_t rating)
+{
+    if (store->revlog_corrupt || store->epoch == 0 || store->revlog_count >= PA_REVLOG_MAX ||
+        card_index >= store->count || rating > PA_EASY) {
+        return false;
+    }
+    uint16_t sector_index = (uint16_t)(store->revlog_count / PA_REVLOG_PER_SECTOR);
+    uint16_t slot = (uint16_t)(store->revlog_count % PA_REVLOG_PER_SECTOR);
+    uint32_t offset = pool_offset((uint16_t)(store->pool_count + sector_index));
+    uint32_t base = (uint32_t)sector_index * PA_REVLOG_PER_SECTOR;
+    if (slot == 0) {
+        memset(store->sector, 0xff, PA_STORE_SECTOR);
+    } else if (!flash_read(store->sched, offset, store->sector, PA_STORE_SECTOR)) {
+        store->revlog_corrupt = true;
+        return false;
+    } else {
+        uint16_t existing = 0;
+        if (!revlog_sector_ok(store->sector, store->epoch, base, &existing) || existing != slot) {
+            store->revlog_corrupt = true;
+            return false;
+        }
+    }
+    uint8_t *rec = store->sector + PA_REVLOG_HEADER + (uint32_t)slot * PA_REVLOG_RECORD;
+    wr_u16(rec, card_index);
+    rec[2] = rating;
+    rec[3] = 0;
+    wr_u32(rec + 4, store->now);
+    uint16_t records = (uint16_t)(slot + 1u);
+    memcpy(store->sector, PA_REVLOG_MAGIC, 4);
+    wr_u32(store->sector + 4, store->epoch);
+    wr_u32(store->sector + 8, base);
+    wr_u16(store->sector + 12, records);
+    wr_u16(store->sector + 14, 0);
+    wr_u32(store->sector + 16, pa_crc32(store->sector + PA_REVLOG_HEADER, (size_t)records * PA_REVLOG_RECORD));
+    wr_u32(store->sector + 20, 0);
+    wr_u32(store->sector + 24, 0);
+    wr_u32(store->sector + 28, pa_crc32(store->sector, 28));
+    if (!flash_erase_write(store->sched, offset, store->sector, PA_STORE_SECTOR)) {
+        return false;
+    }
+    store->revlog_count++;
     return true;
 }
 
@@ -760,6 +884,7 @@ bool pa_store_import_begin(pa_store *store, uint32_t count, uint32_t crc, uint32
         length > PA_STORE_PAYLOAD_MAX) {
         return false;
     }
+    store->export_active = false;
     if (store->import_pending && !store->import_active && store->import_count == count &&
         store->import_crc == crc && store->import_length == length &&
         store->import_slot == staging_slot(store)) {
@@ -1171,6 +1296,11 @@ bool pa_store_import_commit(pa_store *store, pa_store_text_fn text_ok, void *use
     store->epoch = new_epoch;
     store->active_slot = store->import_slot;
     store->deck_count = deck_count;
+    store->revlog_count = 0;
+    store->revlog_dropped = 0;
+    store->revlog_corrupt = false;
+    store->export_active = false;
+    store->mutation++;
     memcpy(store->deck_names, names, sizeof(store->deck_names));
     for (uint16_t i = 0; i < PA_SCHED_CHUNKS; ++i) {
         store->chunk_phys[i] = i < need ? new_phys[i] : PA_NONE;
@@ -1245,4 +1375,170 @@ bool pa_store_migrate_pak1(pa_store *store, const uint8_t *data, size_t size)
     }
     pa_heap_free(collection);
     return ok;
+}
+
+static uint32_t crc_update(uint32_t crc, const uint8_t *data, size_t size)
+{
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xedb88320u & (uint32_t)-(int32_t)(crc & 1u));
+        }
+    }
+    return crc;
+}
+
+static bool read_revlog_record(const pa_store *store, uint32_t rec_index, uint8_t out[PA_REVLOG_RECORD])
+{
+    if (rec_index >= store->revlog_count) {
+        return false;
+    }
+    uint32_t sector_index = rec_index / PA_REVLOG_PER_SECTOR;
+    uint32_t slot = rec_index % PA_REVLOG_PER_SECTOR;
+    uint32_t offset = pool_offset((uint16_t)(store->pool_count + sector_index)) + PA_REVLOG_HEADER +
+                      slot * PA_REVLOG_RECORD;
+    if (!flash_read(store->sched, offset, out, PA_REVLOG_RECORD)) {
+        return false;
+    }
+    return rd_u16(out) < store->count && out[2] <= PA_EASY && out[3] == 0;
+}
+
+static bool export_copy(const pa_store *store, uint32_t offset, uint8_t *dst, uint32_t length)
+{
+    uint16_t cards = rd_u16(store->export_header + 16);
+    uint32_t revlog = rd_u32(store->export_header + 20);
+    uint32_t sched_end = PA_EXPORT_HEADER + (uint32_t)cards * PA_EXPORT_SCHED;
+    uint32_t end = offset + length;
+    if (length == 0 || end < offset || end > store->export_length) {
+        return false;
+    }
+    while (offset < end) {
+        if (offset < PA_EXPORT_HEADER) {
+            uint32_t n = PA_EXPORT_HEADER - offset;
+            if (n > end - offset) {
+                n = end - offset;
+            }
+            memcpy(dst, store->export_header + offset, n);
+            dst += n;
+            offset += n;
+            continue;
+        }
+        if (offset < sched_end) {
+            uint32_t rel = offset - PA_EXPORT_HEADER;
+            uint32_t index = rel / PA_EXPORT_SCHED;
+            uint32_t within = rel % PA_EXPORT_SCHED;
+            uint8_t rec[PA_EXPORT_SCHED];
+            if (index >= cards || !read_record(store, (uint16_t)index, rec)) {
+                return false;
+            }
+            uint32_t n = PA_EXPORT_SCHED - within;
+            if (n > end - offset) {
+                n = end - offset;
+            }
+            memcpy(dst, rec + within, n);
+            dst += n;
+            offset += n;
+            continue;
+        }
+        uint32_t rel = offset - sched_end;
+        uint32_t rec_index = rel / PA_REVLOG_RECORD;
+        uint32_t within = rel % PA_REVLOG_RECORD;
+        uint8_t rec[PA_REVLOG_RECORD];
+        if (rec_index >= revlog || !read_revlog_record(store, rec_index, rec)) {
+            return false;
+        }
+        uint32_t n = PA_REVLOG_RECORD - within;
+        if (n > end - offset) {
+            n = end - offset;
+        }
+        memcpy(dst, rec + within, n);
+        dst += n;
+        offset += n;
+    }
+    return true;
+}
+
+static void fill_export_info(const pa_store *store, pa_export_info *info)
+{
+    info->crc = store->export_crc;
+    info->length = store->export_length;
+    info->epoch = rd_u32(store->export_header + 8);
+    info->now = rd_u32(store->export_header + 12);
+    info->revlog_count = rd_u32(store->export_header + 20);
+    info->dropped = rd_u32(store->export_header + 24);
+    info->served = store->export_served;
+    info->card_count = rd_u16(store->export_header + 16);
+}
+
+bool pa_store_export_begin(pa_store *store, pa_export_info *info)
+{
+    if (store == NULL || info == NULL || store->import_active || store->revlog_corrupt ||
+        (store->status != PA_STORE_READY && store->status != PA_STORE_EMPTY)) {
+        return false;
+    }
+    uint32_t length = PA_EXPORT_HEADER + (uint32_t)store->count * PA_EXPORT_SCHED +
+                      store->revlog_count * PA_REVLOG_RECORD;
+    memset(store->export_header, 0, sizeof(store->export_header));
+    memcpy(store->export_header, PA_EXPORT_MAGIC, 4);
+    wr_u16(store->export_header + 4, 1);
+    wr_u16(store->export_header + 6, PA_EXPORT_HEADER);
+    wr_u32(store->export_header + 8, store->epoch);
+    wr_u32(store->export_header + 12, store->now);
+    wr_u16(store->export_header + 16, store->count);
+    wr_u16(store->export_header + 18, PA_EXPORT_SCHED);
+    wr_u32(store->export_header + 20, store->revlog_count);
+    wr_u32(store->export_header + 24, store->revlog_dropped);
+    wr_u32(store->export_header + 28, 0);
+    store->export_length = length;
+    store->export_cards = store->count;
+    uint32_t crc = 0xffffffffu;
+    uint32_t done = 0;
+    uint8_t buf[256];
+    while (done < length) {
+        uint32_t n = length - done;
+        if (n > sizeof(buf)) {
+            n = (uint32_t)sizeof(buf);
+        }
+        if (!export_copy(store, done, buf, n)) {
+            store->export_active = false;
+            return false;
+        }
+        crc = crc_update(crc, buf, n);
+        done += n;
+    }
+    store->export_crc = crc ^ 0xffffffffu;
+    store->export_served = 0;
+    store->export_stamp = store->mutation;
+    store->export_active = true;
+    fill_export_info(store, info);
+    return true;
+}
+
+bool pa_store_export_read(pa_store *store, uint32_t offset, uint8_t *dst, uint32_t cap, uint32_t *got)
+{
+    if (store == NULL || dst == NULL || got == NULL || !store->export_active ||
+        store->mutation != store->export_stamp || offset >= store->export_length || cap == 0) {
+        return false;
+    }
+    uint32_t n = store->export_length - offset;
+    if (n > cap) {
+        n = cap;
+    }
+    if (!export_copy(store, offset, dst, n)) {
+        return false;
+    }
+    if (offset <= store->export_served && offset + n > store->export_served) {
+        store->export_served = offset + n;
+    }
+    *got = n;
+    return true;
+}
+
+bool pa_store_export_status(const pa_store *store, pa_export_info *info)
+{
+    if (store == NULL || info == NULL || !store->export_active) {
+        return false;
+    }
+    fill_export_info(store, info);
+    return true;
 }

@@ -15,9 +15,10 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 | 断电恢复 | 实现 | 评分先把调度块写到新扇区，超级块最后发布；导入在超级块写入前不影响旧牌组 |
 | 中文显示、长文本分页 | 实现 | 覆盖中文基本区及规定字符范围；不支持 emoji/富文本 |
 | 电脑 USB 导入 | 实现 | TSV；旧式 Basic APKG；JLPT 字段牌组。分块上传，CRC 校验后整组替换并重置复习记录 |
+| 本机 Anki 取牌组与回写 | 实现 | 设备离线。电脑用 AnkiConnect 或只读集合副本取出 Basic/JLPT 文本，经现有 v2 USB 导入。复习档位经 `answerCards` 交回本机 Anki，由 Anki 计算间隔。用户再在官方客户端同步 AnkiWeb |
 | 完整 APKG/Anki 集合兼容 | 不包含 | 不运行 Anki 模板引擎；不提取媒体；anki21b 拒绝。Anki 的 i64 卡片 ID 只留在电脑映射里 |
 | 图片、音频、TTS、手写、数学公式 | 不包含 | 后续资源包设计 |
-| AnkiWeb、Wi-Fi、账号、FSRS | 不包含 | 后续独立里程碑 |
+| 设备登录 AnkiWeb、Wi-Fi、FSRS | 不包含 | 设备不保存密码或 hkey，不实现同步协议。间隔算法仍是本文第 7 节，不是 FSRS |
 | 自动 RTC/关机计时 | 不包含 | 离线学习时钟，用户明确推进日期 |
 | 自动深睡眠/OTA/多应用启动器 | 不包含 | 首版独立 factory 固件；先验证稳定性 |
 
@@ -118,15 +119,16 @@ UTF-8 规则不变：拒绝截断、多余 continuation、overlong、surrogate�
 
 ### 6.2 调度分区
 
-`sched` 前 4 个扇区是元数据，其余是池（本表 204 个扇区，代码上限 240）。
+`sched` 共 208 个扇区（分区 `0xD0000`，分区表未改）。前 4 个扇区是元数据，末尾 48 个扇区是复习日志，中间 156 个扇区是调度池（代码里池的数组上限仍是 240）。导入时池里要同时放下旧 epoch 和新 epoch 的块（最多 120），156 里还剩 36 个空闲扇区。
 
-- 扇区 0 和 1：超级块 `PSS2`，version=2。双槽轮换，读 generation 较大且 CRC 通过的一份。字段：count、now、epoch、活动槽、牌组数。
+- 扇区 0 和 1：超级块 `PSS2`，version=2。双槽轮换，读 generation 较大且 CRC 通过的一份。字段：count、now、epoch、活动槽、牌组数。同一份 28 字节 CRC 覆盖范围内的偏移 24 另存 `revlog_dropped`。
 - 扇区 2 和 3：导入进度 `PIM1`。记录已落到 flash 的 payload 偏移（满扇区，或最后一块不足扇区但已写完）。RAM 里未刷出的尾部在重启后丢弃。
 - 池内每块 4 KiB，magic `PSCH`。头 32 字节含 generation、擦除计数、epoch、块号、记录数、记录区 CRC。每条调度记录 20 字节，一块 203 条。12,000 张需要 60 块。
+- 末尾 48 个扇区是复习日志，magic `PRLG`，扇区头 32 字节。每条 8 字节：卡片下标 u16、评分 u8（0..3）、保留 u8（必须为 0）、逻辑分钟 u32。一个扇区 508 条，一共 24,384 条。序号是该 epoch 内的位置，从 1 起。导入提交会换 epoch 并忽略旧 epoch 的日志，效果上等于清空。评分先写调度块，再追加日志。日志写满或追加失败时评分仍然成功，`revlog_dropped` 加一。导出只读。导出进行中如果又评了分，这次快照会作废，主机必须重新 `EXPORT`。推进学习时钟不会作废快照。
 
 到期队列按块流式扫描：先 LEARNING，再 REVIEW，再 NEW，然后 due 升序、id 升序。不把 12,000 条抄进 RAM。
 
-评分把改过的那一块写到擦除次数最低的空闲扇区，块头 CRC 最后写入。成功后这块的 generation 更高；断电时旧块仍在，挂载会选 generation 最大的有效块。超级块的 now 更新是尽力而为，块写入才是评分的提交点。多次评分同一张卡会在空闲扇区之间轮换，不会反复擦同一扇区。导入时池里要同时放下旧 epoch 和新 epoch 的块（最多 120）以及余量。
+评分把改过的那一块写到擦除次数最低的空闲扇区，块头 CRC 最后写入。成功后这块的 generation 更高；断电时旧块仍在，挂载会选 generation 最大的有效块。超级块的 now 更新是尽力而为，块写入才是评分的提交点。多次评分同一张卡会在空闲扇区之间轮换，不会反复擦同一扇区。
 
 导入发布顺序：写索引、写新 epoch 的调度块、写槽头、最后写超级块，然后清进度。超级块写入之前崩溃，旧牌组仍是活动牌组。显式导入可以覆盖 `PA_STORE_CORRUPT`；不会因为挂载失败去擦 NVS。
 
@@ -212,19 +214,24 @@ RESUME                            -> OK RESUME offset=N count=N crc=N length=N
 COMMIT                            -> OK COMMIT
 ABORT                             -> OK ABORT
 DAY N                             -> OK DAY
+EXPORT                            -> OK EXPORT cards=N revlog=N crc=N length=N epoch=N dropped=N now=N offset=0
+XCHUNK offset                     -> OK XCHUNK end hex
+XRESUME                           -> OK XRESUME cards=N revlog=N crc=N length=N epoch=N dropped=N now=N offset=N
 ```
 
 `resume` 是已经落盘的偏移；同一进程里若还有未刷出的尾部，RESUME 会把这段也算进去。主机从该偏移继续，不盲目重发旧偏移。BEGIN 在设备重启后可以接上同一 count/crc/length 的进度。块确认丢失时先 RESUME，对不上才 ABORT。COMMIT 在 payload 到齐且 CRC、牌组数、字体都通过后才回答 OK。解析器仍接受旧的 CARD 行，固件和模拟器不把它当作导入路径。
 
 错误仍是 `ERR <code>`。COMMIT 失败不能回 OK。再次 BEGIN 在事务未结束时拒绝。60 秒无输入自动 ABORT。长按 OK 可中止。队列仍是 4 条，忙则 `ERR BUSY`。工具逐条等 ACK，不把启动日志当成 ACK。
 
-导入脚本：`inspect input.tsv` 验证并统计；`commands input.tsv --output deck.commands` 离线导出；`upload input.tsv --port /dev/cu.usbmodem...`（pyserial可选依赖）串行执行，校验所有ACK，只有 OK COMMIT 才报告成功。超时/ERR报告失败，尝试ABORT。先INFO检查协议版本。
+`EXPORT` 开始一次只读快照。镜像 magic `PREV`，头 32 字节（version u16=1，头长 32，epoch、now、卡片数、调度记录长 20、复习条数、dropped、flags=0），后面按卡片下标排列 20 字节调度记录，再接 8 字节复习记录。CRC 是整幅镜像的 zlib/IEEE，写在 OK 行上，不放进镜像。满载大约 32 + 12000×20 + 24384×8 字节，设备按块现算 CRC，不把镜像放进 RAM。`XCHUNK` 的块最大 480 字节，hex 行仍低于 1200 字节，偏移可以不连续。主机超时后发 `XRESUME`，核对 crc、length、epoch、revlog，再从自己已经拼好的长度继续，不跳过没读到的字节。没有会话时 `XCHUNK` 返回 `ERR RANGE`，`XRESUME` 返回 `ERR TRANSACTION`。导入进行中 `EXPORT` 返回 `ERR TRANSACTION`。协议版本仍是 2，`INFO` 行不变；旧固件会拒绝这些新命令。
+
+导入脚本：`inspect input.tsv` 验证并统计；`commands input.tsv --output deck.commands` 离线导出；`upload input.tsv --port /dev/cu.usbmodem...`（pyserial可选依赖）串行执行，校验所有ACK，只有 OK COMMIT 才报告成功。超时/ERR报告失败，尝试ABORT。先INFO检查协议版本。`anki-decks`、`anki-pull`、`sync-back` 见 [user-guide.md](user-guide.md)。回写只用映射里的设备 id 和复习档位调用 AnkiConnect `answerCards`，不把设备算出的 interval 写进 Anki。
 
 ## 13. RAM、flash和性能预算
 
 | 项目 | 预算/要求 |
 |---|---|
-| `pa_store` | 静态一份，含 4 KiB 扇区缓冲和 64 个牌组名。编译期不超过 12 KiB；当前结构 7,840 字节 |
+| `pa_store` | 静态一份，含 4 KiB 扇区缓冲、64 个牌组名和 32 字节导出头。编译期不超过 12 KiB；当前结构 7,904 字节（复习日志字段相对 7,840 增加 64 字节） |
 | 当前卡文本 | 正面、背面各 512 字节，牌组名 48 字节 |
 | 提交时临时堆 | id 数组加牌组名表，高水位必须 `<= 64 KiB`，返回后为 0 |
 | 稳态选卡/评分 | 不再 malloc |
@@ -240,7 +247,7 @@ DAY N                             -> OK DAY
 
 ## 14. 验证矩阵与验收
 
-主机：CMake+CTest，ASan/UBSan。覆盖学习步骤、四评分、due排序/牌组隔离、未翻面拒绝、重复评分拒绝、整数溢出、10000次重复复习、最大牌组、UTF-8边界。codec覆盖往返、每个截断长度、每个字节CRC破坏、未知版本、非法状态、目标不变。Python覆盖TSV/BOM/引用换行、重复ID/超限/unsupported APKG、HTML到文本、上传ACK/ERR/超时。
+主机：CMake+CTest，ASan/UBSan。覆盖学习步骤、四评分、due排序/牌组隔离、未翻面拒绝、重复评分拒绝、整数溢出、10000次重复复习、最大牌组、UTF-8边界、复习日志导出与重新挂载、导入后日志清空。codec覆盖往返、每个截断长度、每个字节CRC破坏、未知版本、非法状态、目标不变。Python覆盖TSV/BOM/引用换行、重复ID/超限/unsupported APKG、HTML到文本、上传ACK/ERR/超时、AnkiConnect 假服务器、schema 11/18 只读副本、导出续传与 CRC、回写幂等和 dry-run。
 
 固件：ESP-IDF 5.5.3 build、size、merge-bin、分区边界。CI产物至少 app.bin、bootloader.bin、partition-table.bin、full.bin、构建与size记录，不把full.bin自动刷到用户设备。
 

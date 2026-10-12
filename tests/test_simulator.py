@@ -1,5 +1,8 @@
 import os
+import re
+import struct
 import subprocess
+import zlib
 from pathlib import Path
 
 import pytest
@@ -228,3 +231,92 @@ def test_binary_input_rejects_nul_internal_cr_and_recovers_after_long_line():
     assert "已评分：Good" in output
     assert "OK INFO version=2 cards=1 day=0" in output
     assert output.endswith("再见。\n")
+
+
+def _export_lines(output):
+    meta = None
+    chunks = []
+    resumes = []
+    for line in output.splitlines():
+        if line.startswith("OK EXPORT ") or line.startswith("OK XRESUME "):
+            match = re.fullmatch(
+                r"OK (?:EXPORT|XRESUME) cards=(\d+) revlog=(\d+) crc=(\d+) length=(\d+) "
+                r"epoch=(\d+) dropped=(\d+) now=(\d+) offset=(\d+)",
+                line,
+            )
+            assert match, line
+            parsed = {
+                "kind": "EXPORT" if line.startswith("OK EXPORT") else "XRESUME",
+                "cards": int(match.group(1)),
+                "revlog": int(match.group(2)),
+                "crc": int(match.group(3)),
+                "length": int(match.group(4)),
+                "epoch": int(match.group(5)),
+                "dropped": int(match.group(6)),
+                "now": int(match.group(7)),
+                "offset": int(match.group(8)),
+            }
+            if parsed["kind"] == "EXPORT":
+                meta = parsed
+            else:
+                resumes.append(parsed)
+        elif line.startswith("OK XCHUNK "):
+            match = re.fullmatch(r"OK XCHUNK (\d+) ([0-9a-fA-F]+)", line)
+            assert match, line
+            data = bytes.fromhex(match.group(2))
+            chunks.append((int(match.group(1)) - len(data), data))
+    assert meta is not None
+    return meta, chunks, resumes
+
+
+def _assemble(meta, chunks):
+    image = bytearray()
+    for offset, data in chunks:
+        if offset == len(image) and len(image) < meta["length"]:
+            image += data
+    assert len(image) == meta["length"]
+    assert zlib.crc32(image) & 0xFFFFFFFF == meta["crc"]
+    return bytes(image)
+
+
+def test_export_resume_crc_and_import_clears_the_log(tmp_path):
+    snapshot = tmp_path / "study.pak"
+    cards = [(index, "Deck", "Q", "A") for index in range(1, 31)]
+    script = import_commands(cards)
+    script += "DECK Deck\nNEXT\nFLIP\nRATE HARD\nEXPORT\nXCHUNK 0\nXRESUME\nXCHUNK 0\n"
+    for offset in range(0, 4096, 480):
+        script += f"XCHUNK {offset}\n"
+    script += "XCHUNK 999999\nQUIT\n"
+    result = run_sim("--state", snapshot, commands=script)
+    assert result.returncode == 0, result.stderr
+    meta, chunks, resumes = _export_lines(result.stdout)
+    assert meta["cards"] == 30 and meta["revlog"] == 1 and meta["dropped"] == 0
+    assert resumes and resumes[0]["crc"] == meta["crc"] and resumes[0]["length"] == meta["length"]
+    assert "ERR RANGE" in result.stdout
+    image = _assemble(meta, chunks)
+    header = image[:32]
+    assert header[:4] == b"PREV"
+    _version, _header_len, epoch, _now, cards_n, sched_len, revlog, dropped, flags = struct.unpack_from("<HHIIHHIII", header, 4)
+    assert (cards_n, sched_len, revlog, dropped, flags) == (30, 20, 1, 0, 0)
+    review = image[32 + 30 * 20:]
+    index, rating, reserved, _minute = struct.unpack("<HBBI", review)
+    assert (index, rating, reserved) == (0, 1, 0)
+    repeated = [data for offset, data in chunks if offset == 0]
+    assert len(repeated) >= 2 and repeated[0] == repeated[1]
+
+    replaced = run_sim(
+        "--state", snapshot,
+        commands=import_commands([(1, "Deck", "Front", "Back")]) + "EXPORT\nXCHUNK 0\nQUIT\n",
+    )
+    assert replaced.returncode == 0, replaced.stderr
+    cleared, cleared_chunks, _resumes = _export_lines(replaced.stdout)
+    assert cleared["cards"] == 1 and cleared["revlog"] == 0 and cleared["epoch"] != epoch
+    cleared_image = _assemble(cleared, cleared_chunks)
+    assert len(cleared_image) == 32 + 20
+
+
+def test_export_before_begin_is_rejected():
+    result = run_sim(commands="XCHUNK 0\nXRESUME\nQUIT\n")
+    assert result.returncode == 0, result.stderr
+    assert "ERR RANGE" in result.stdout
+    assert "ERR TRANSACTION" in result.stdout

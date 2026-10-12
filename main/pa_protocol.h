@@ -13,7 +13,10 @@ typedef enum {
     PA_PROTOCOL_COMMIT,
     PA_PROTOCOL_ABORT,
     PA_PROTOCOL_DAY,
-    PA_PROTOCOL_RESUME
+    PA_PROTOCOL_RESUME,
+    PA_PROTOCOL_EXPORT,
+    PA_PROTOCOL_XCHUNK,
+    PA_PROTOCOL_XRESUME
 } pa_protocol_kind;
 
 #define PA_PROTOCOL_CHUNK_MAX 480u
@@ -33,5 +36,6 @@ typedef struct {
 #define PA_PROTOCOL_MAX_LINE 1200u
 
 bool pa_protocol_parse(const char *line, size_t length, pa_protocol_command *out);
+void pa_protocol_write_hex(const uint8_t *data, size_t length, char *out);
 
 #endif

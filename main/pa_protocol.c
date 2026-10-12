@@ -123,6 +123,16 @@ static bool pa_split_tokens(const char *line, size_t length, pa_token tokens[6],
     return *count != 0;
 }
 
+void pa_protocol_write_hex(const uint8_t *data, size_t length, char *out)
+{
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < length; ++i) {
+        out[i * 2u] = hex[data[i] >> 4];
+        out[i * 2u + 1u] = hex[data[i] & 0x0fu];
+    }
+    out[length * 2u] = '\0';
+}
+
 bool pa_protocol_parse(const char *line, size_t length, pa_protocol_command *out)
 {
     if (line == NULL || out == NULL || length == 0 || length > PA_PROTOCOL_MAX_LINE ||
@@ -173,6 +183,15 @@ bool pa_protocol_parse(const char *line, size_t length, pa_protocol_command *out
         candidate.length = (uint32_t)bytes;
     } else if (pa_token_equal(tokens[0], "DAY") && count == 2) {
         candidate.kind = PA_PROTOCOL_DAY;
+        if (!pa_parse_u32(tokens[1], &candidate.value)) {
+            return false;
+        }
+    } else if (pa_token_equal(tokens[0], "EXPORT") && count == 1) {
+        candidate.kind = PA_PROTOCOL_EXPORT;
+    } else if (pa_token_equal(tokens[0], "XRESUME") && count == 1) {
+        candidate.kind = PA_PROTOCOL_XRESUME;
+    } else if (pa_token_equal(tokens[0], "XCHUNK") && count == 2) {
+        candidate.kind = PA_PROTOCOL_XCHUNK;
         if (!pa_parse_u32(tokens[1], &candidate.value)) {
             return false;
         }
