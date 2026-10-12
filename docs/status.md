@@ -43,4 +43,14 @@ Luna high 新增 `passport_sim`，复用固件 C 核心、快照和导入事务�
 
 主机：`CC=gcc` 的 ASan/UBSan CTest 6/6 通过。`test_store` 打印 `pa_store` 7,904 字节、复习日志上限 24,384。pytest `tests/test_deck.py`、`tests/test_anki_sync.py`、`tests/test_simulator.py` 共 43 项通过，覆盖 AnkiConnect 假服务器、schema 11/18 只读副本、导出续传与 CRC、回写幂等和 dry-run。
 
-固件体积相对上一节的万张容量构建（应用镜像 2,176,832 字节，DRAM 已用 115,842、剩余 205,454 / 321,296）待本次 `tools/validate_firmware.sh` 填入。真机刷写、USB 传输、真实 Anki Desktop 和 AnkiWeb 同步仍是 NOT RUN。
+本地 `IDF_PATH` 指向 ESP-IDF 5.5.3 时，`tools/validate_firmware.sh` 通过。相对上一节的万张容量构建：
+
+| 项目 | 万张容量 | 本次 | 差值 |
+|---|---:|---:|---:|
+| 应用镜像 | 2,176,832 | 2,180,048 | +3,216 |
+| factory 余量（上限 2,621,440） | 444,608 | 441,392 | −3,216 |
+| DRAM 已用（共 321,296） | 115,842 | 115,906 | +64 |
+| DRAM 剩余 | 205,454 | 205,390 | −64 |
+| `pa_store` 静态大小 | 7,840 | 7,904 | +64 |
+
+应用镜像 2,180,048 / 2,621,440 字节，余量 441,392 字节（17%）。链接后 Flash 数据 1,619,132 字节，Flash 代码 484,718 字节。DRAM 增加的 64 字节与 `pa_store` 增加的导出和日志字段一致。分区表未改。这些是编译和主机测试数字。真机刷写、USB 传输、真实 Anki Desktop 和 AnkiWeb 同步仍是 NOT RUN。
