@@ -115,7 +115,7 @@ def test_apkg_basic_converts_html_to_plain_text_and_deck_name(tmp_path):
     path = tmp_path / "basic.apkg"
     _make_apkg(path)
     cards = deck.load_deck(path)
-    assert cards == [deck.Card(1, "Language", "Question\ntwo", "Answer", "1")]
+    assert cards == [deck.Card(1, "Language", "Question\ntwo", "Answer", "1", "1")]
 
 
 def test_apkg_rejects_cloze_and_custom_models(tmp_path):

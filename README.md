@@ -14,7 +14,7 @@ FoloToy AI Passport 离线文字闪卡复习器：牌组选择 → 翻面 → Ag
 - 电脑 UTF-8 TSV 导入；旧式 Basic APKG，以及 JLPT 字段牌组（假名展开、丢弃音频图片）。
 - 三键分页、学习日推进；字体覆盖清单中的 21,957 个码点，缺字明确拒绝。
 
-完整 Anki 模板/FSRS/AnkiWeb/图片/音频不在首版范围。离线学习时钟不计入关机时间，日期由菜单或电脑命令推进。导入会整体替换卡片并重置复习历史。
+完整 Anki 模板、FSRS、图片和音频不在范围内。设备不上网，也不保存 AnkiWeb 凭据。电脑可以读取已经同步到本机的 Anki 集合，并把设备评分经 AnkiConnect 交回本机 Anki，再由用户在官方 Anki 里同步 AnkiWeb。离线学习时钟不计入关机时间，日期由菜单或电脑命令推进。导入会整体替换卡片并重置复习历史。
 
 ## 电脑导入
 
@@ -34,7 +34,7 @@ cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON
 cmake --build build/host
 ctest --test-dir build/host --output-on-failure
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest tests/test_deck.py tests/test_simulator.py -q
+python3 -m pytest tests/test_deck.py tests/test_anki_sync.py tests/test_simulator.py -q
 ```
 
 ## 桌面学习模拟器

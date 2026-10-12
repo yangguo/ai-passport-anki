@@ -17,7 +17,7 @@
 
 [成功固件构建](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196721)、[成功主机测试](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196776)。具体记录见 [acceptance.md](acceptance.md)。
 
-范围：最多 12,000 张多牌组纯文本、三键分页、四评分简化调度、分区存档、USB 分块导入。导入替换整组并清零复习历史；从旧 PAK1 迁移时保留复习状态。学习时钟不计关机时间。不包含 FSRS、AnkiWeb、图片/音频、完整 Anki 模板或 anki21b。
+范围：最多 12,000 张多牌组纯文本、三键分页、四评分简化调度、分区存档、USB 分块导入。导入替换整组并清零复习历史；从旧 PAK1 迁移时保留复习状态。学习时钟不计关机时间。电脑可以读取本机 Anki 并把评分经 AnkiConnect 交回，由用户在官方 Anki 里同步 AnkiWeb。设备不上网，不保存凭据。不包含 FSRS、设备端 AnkiWeb、图片/音频、完整 Anki 模板或 anki21b。
 
 ## 万张容量（2026-10-11）
 
@@ -36,3 +36,11 @@ Luna high 新增 `passport_sim`，复用固件 C 核心、快照和导入事务�
 本地 ASan/UBSan 构建与 CTest 5/5、pytest 30/30 均通过；使用真实 `tools/deck.py` 生成 demo.tsv 的8张卡导入命令后，中文牌组复习及存档通过。详情见 [simulator.md](simulator.md)。真机验收仍为 NOT RUN。
 
 源码提交：`4d7e63cfb7797eab056704e50d712044a71b2a8c`；[Host CI SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/38132744938)（CTest 5/5、pytest 30/30）；[Firmware CI SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/38132744957)（编译、分区/size检查、合并镜像及上传产物）。本次未另行下载镜像校验，也未执行真机验收。
+
+## 本机 Anki 路径（2026-10-12）
+
+`sched` 分区表未改。末尾 48 个扇区（192 KiB）改成复习日志，每条 8 字节，最多 24,384 次评分。调度池从 204 个扇区减到 156 个，导入仍能同时放下新旧 epoch 的 120 块，并留下 36 个空闲扇区。`pa_store` 静态大小从 7,840 字节增到 7,904 字节（+64）。协议仍是 version 2，新增只读 `EXPORT` / `XCHUNK` / `XRESUME`。主机 `anki-decks`、`anki-pull`、`sync-back` 见 [user-guide.md](user-guide.md) 和 [ankiweb-sync.md](ankiweb-sync.md) 第 13 节。
+
+主机：`CC=gcc` 的 ASan/UBSan CTest 6/6 通过。`test_store` 打印 `pa_store` 7,904 字节、复习日志上限 24,384。pytest `tests/test_deck.py`、`tests/test_anki_sync.py`、`tests/test_simulator.py` 共 43 项通过，覆盖 AnkiConnect 假服务器、schema 11/18 只读副本、导出续传与 CRC、回写幂等和 dry-run。
+
+固件体积相对上一节的万张容量构建（应用镜像 2,176,832 字节，DRAM 已用 115,842、剩余 205,454 / 321,296）待本次 `tools/validate_firmware.sh` 填入。真机刷写、USB 传输、真实 Anki Desktop 和 AnkiWeb 同步仍是 NOT RUN。

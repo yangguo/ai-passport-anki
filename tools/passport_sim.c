@@ -291,6 +291,15 @@ static void reply_error(const char *code)
     fflush(stdout);
 }
 
+static void reply_export(const char *kind, const pa_export_info *info)
+{
+    printf("OK %s cards=%u revlog=%" PRIu32 " crc=%" PRIu32 " length=%" PRIu32
+           " epoch=%" PRIu32 " dropped=%" PRIu32 " now=%" PRIu32 " offset=%" PRIu32 "\n",
+           kind, info->card_count, info->revlog_count, info->crc, info->length, info->epoch,
+           info->dropped, info->now, info->served);
+    fflush(stdout);
+}
+
 static bool no_arguments(const char *arguments)
 {
     while (*arguments == ' ' || *arguments == '\t') {
@@ -447,6 +456,37 @@ static void handle_import(const pa_protocol_command *command)
         fflush(stdout);
         break;
     }
+    case PA_PROTOCOL_EXPORT: {
+        pa_export_info info;
+        if (store.import_active || !pa_store_export_begin(&store, &info)) {
+            reply_error(store.import_active ? "TRANSACTION" : "REVLOG");
+            break;
+        }
+        reply_export("EXPORT", &info);
+        break;
+    }
+    case PA_PROTOCOL_XCHUNK: {
+        uint8_t chunk[PA_PROTOCOL_CHUNK_MAX];
+        uint32_t got = 0;
+        char hex[PA_PROTOCOL_CHUNK_MAX * 2u + 1u];
+        if (!pa_store_export_read(&store, command->value, chunk, sizeof(chunk), &got)) {
+            reply_error("RANGE");
+            break;
+        }
+        pa_protocol_write_hex(chunk, got, hex);
+        printf("OK XCHUNK %" PRIu32 " %s\n", command->value + got, hex);
+        fflush(stdout);
+        break;
+    }
+    case PA_PROTOCOL_XRESUME: {
+        pa_export_info info;
+        if (!pa_store_export_status(&store, &info)) {
+            reply_error("TRANSACTION");
+            break;
+        }
+        reply_export("XRESUME", &info);
+        break;
+    }
     case PA_PROTOCOL_CARD:
         reply_error("COMMAND");
         break;
@@ -514,6 +554,7 @@ static void handle_line(char *line, size_t original_length)
     if (strcmp(line, "HELP") == 0 && no_arguments(arguments)) {
         puts("命令：HELP, DECK <牌组>, NEXT, FLIP, RATE AGAIN|HARD|GOOD|EASY, ADVANCE <分钟>, QUIT");
         puts("导入协议：INFO, BEGIN count crc length, CHUNK offset hex, COMMIT, ABORT, RESUME, DAY n");
+        puts("复习导出：EXPORT, XCHUNK offset, XRESUME");
         puts("RATE 只能在 FLIP 显示背面后执行；DAY 只能向前推进。");
         fflush(stdout);
         return;

@@ -10,6 +10,7 @@
 /* Flash-backed collection for up to 12,000 cards.
  * Card text lives in the cards partition and is read per card.
  * Scheduling records live in wear-leveled 4 KiB chunks in the sched partition.
+ * A review log occupies the last 48 sectors of that same partition (8 bytes per grade).
  * Steady-state RAM is one pa_store (see PA_STORE_RAM_BUDGET), not one object per card.
  *
  * The legacy PAK1 snapshot (pa_encode/pa_decode, 64 cards) still migrates in. */
@@ -33,6 +34,15 @@
 #define PA_SCHED_CHUNKS ((PA_STORE_MAX_CARDS + PA_SCHED_PER_CHUNK - 1u) / PA_SCHED_PER_CHUNK)
 #define PA_POOL_CAP 240u
 #define PA_META_SECTORS 4u
+/* Tail of the sched partition. 8-byte review records, not Anki intervals. */
+#define PA_REVLOG_SECTORS 48u
+#define PA_REVLOG_HEADER 32u
+#define PA_REVLOG_RECORD 8u
+#define PA_REVLOG_PER_SECTOR ((PA_STORE_SECTOR - PA_REVLOG_HEADER) / PA_REVLOG_RECORD)
+#define PA_REVLOG_MAX (PA_REVLOG_SECTORS * PA_REVLOG_PER_SECTOR)
+#define PA_SCHED_POOL_SECTORS ((PA_SCHED_PARTITION_SIZE / PA_STORE_SECTOR) - PA_META_SECTORS - PA_REVLOG_SECTORS)
+#define PA_EXPORT_HEADER 32u
+#define PA_EXPORT_SCHED 20u
 #define PA_STORE_RAM_BUDGET 12288u
 #define PA_STORE_COMMIT_HEAP_MAX 65536u
 #define PA_PROTOCOL_VERSION 2u
@@ -78,7 +88,29 @@ typedef struct pa_store {
     uint32_t import_length;
     uint32_t import_durable;
     uint32_t import_progress_generation;
+    uint32_t revlog_count;
+    uint32_t revlog_dropped;
+    uint32_t mutation;
+    uint32_t export_length;
+    uint32_t export_crc;
+    uint32_t export_served;
+    uint32_t export_stamp;
+    uint16_t export_cards;
+    bool export_active;
+    bool revlog_corrupt;
+    uint8_t export_header[PA_EXPORT_HEADER];
 } pa_store;
+
+typedef struct {
+    uint32_t crc;
+    uint32_t length;
+    uint32_t epoch;
+    uint32_t now;
+    uint32_t revlog_count;
+    uint32_t dropped;
+    uint32_t served;
+    uint16_t card_count;
+} pa_export_info;
 
 void pa_store_init(pa_store *store, pa_flash *cards, pa_flash *sched);
 pa_store_status pa_store_mount(pa_store *store);
@@ -105,6 +137,12 @@ bool pa_store_import_commit(pa_store *store, pa_store_text_fn text_ok, void *use
 void pa_store_import_abort(pa_store *store);
 bool pa_store_import_resume(const pa_store *store, uint32_t *offset, uint32_t *count,
                             uint32_t *crc, uint32_t *length);
+
+/* Read-only snapshot of scheduling records plus the review log. Grades stay on the device
+ * until the host replays them through Anki. Export does not allocate. */
+bool pa_store_export_begin(pa_store *store, pa_export_info *info);
+bool pa_store_export_read(pa_store *store, uint32_t offset, uint8_t *dst, uint32_t cap, uint32_t *got);
+bool pa_store_export_status(const pa_store *store, pa_export_info *info);
 bool pa_store_import_collection(pa_store *store, const pa_collection *collection);
 bool pa_store_migrate_pak1(pa_store *store, const uint8_t *data, size_t size);
 
