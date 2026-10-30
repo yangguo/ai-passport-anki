@@ -194,18 +194,54 @@ static uint32_t pa_round_div(uint64_t numerator, uint32_t denominator)
     return (uint32_t)((numerator + denominator / 2u) / denominator);
 }
 
-bool pa_grade(pa_collection *c, pa_session *s, pa_rating rating)
+static void pa_sched_from_card(pa_sched *sched, const pa_card *card)
 {
-    if (c == NULL || s == NULL || !s->revealed || s->current >= c->count ||
-        c->count > PA_MAX_CARDS || rating < PA_AGAIN || rating > PA_EASY) {
-        return false;
-    }
-    const pa_card *live = &c->cards[s->current];
-    if (!pa_card_valid(live)) {
-        return false;
-    }
+    sched->id = card->id;
+    sched->due = card->due;
+    sched->interval = card->interval;
+    sched->ease = card->ease;
+    sched->reviews = card->reviews;
+    sched->lapses = card->lapses;
+    sched->stage = card->stage;
+    sched->step = card->step;
+}
 
-    pa_card candidate = *live;
+static void pa_sched_apply(pa_card *card, const pa_sched *sched)
+{
+    card->id = sched->id;
+    card->due = sched->due;
+    card->interval = sched->interval;
+    card->ease = sched->ease;
+    card->reviews = sched->reviews;
+    card->lapses = sched->lapses;
+    card->stage = sched->stage;
+    card->step = sched->step;
+}
+
+bool pa_sched_valid(const pa_sched *card)
+{
+    if (card == NULL || card->id == 0 || card->ease < 1300 || card->ease > 3500 ||
+        card->interval > PA_MAX_INTERVAL) {
+        return false;
+    }
+    switch ((pa_stage)card->stage) {
+    case PA_NEW:
+        return card->interval == 0 && card->step == 0;
+    case PA_LEARNING:
+        return card->interval == 0 && card->step <= 1;
+    case PA_REVIEW:
+        return card->interval >= 1 && card->step == 0;
+    default:
+        return false;
+    }
+}
+
+bool pa_grade_sched(pa_sched *card, uint32_t now, pa_rating rating)
+{
+    if (!pa_sched_valid(card) || rating < PA_AGAIN || rating > PA_EASY) {
+        return false;
+    }
+    pa_sched candidate = *card;
     uint32_t delay;
     if (candidate.stage == PA_NEW || candidate.stage == PA_LEARNING) {
         bool was_learning_step_one = candidate.stage == PA_LEARNING && candidate.step == 1;
@@ -235,8 +271,8 @@ bool pa_grade(pa_collection *c, pa_session *s, pa_rating rating)
         candidate.lapses = pa_saturating_increment(candidate.lapses);
         delay = 1;
     } else {
-        uint32_t interval = live->interval;
-        uint32_t good_interval = pa_round_div((uint64_t)interval * live->ease, 1000u);
+        uint32_t interval = card->interval;
+        uint32_t good_interval = pa_round_div((uint64_t)interval * card->ease, 1000u);
         if (good_interval < interval + 1u) {
             good_interval = interval + 1u;
         }
@@ -248,7 +284,7 @@ bool pa_grade(pa_collection *c, pa_session *s, pa_rating rating)
         } else if (rating == PA_GOOD) {
             candidate.interval = (uint16_t)(good_interval > PA_MAX_INTERVAL ? PA_MAX_INTERVAL : good_interval);
         } else {
-            uint32_t easy_interval = pa_round_div((uint64_t)interval * live->ease * 13u, 10000u);
+            uint32_t easy_interval = pa_round_div((uint64_t)interval * card->ease * 13u, 10000u);
             uint32_t minimum = good_interval + 1u;
             if (easy_interval < minimum) {
                 easy_interval = minimum;
@@ -259,11 +295,35 @@ bool pa_grade(pa_collection *c, pa_session *s, pa_rating rating)
         delay = pa_interval_due(candidate.interval);
     }
 
-    if (delay > UINT32_MAX - c->now) {
+    if (delay > UINT32_MAX - now) {
         return false;
     }
-    candidate.due = c->now + delay;
+    candidate.due = now + delay;
     candidate.reviews = pa_saturating_increment(candidate.reviews);
+    if (!pa_sched_valid(&candidate)) {
+        return false;
+    }
+    *card = candidate;
+    return true;
+}
+
+bool pa_grade(pa_collection *c, pa_session *s, pa_rating rating)
+{
+    if (c == NULL || s == NULL || !s->revealed || s->current >= c->count ||
+        c->count > PA_MAX_CARDS || rating < PA_AGAIN || rating > PA_EASY) {
+        return false;
+    }
+    const pa_card *live = &c->cards[s->current];
+    if (!pa_card_valid(live)) {
+        return false;
+    }
+    pa_sched sched;
+    pa_sched_from_card(&sched, live);
+    if (!pa_grade_sched(&sched, c->now, rating)) {
+        return false;
+    }
+    pa_card candidate = *live;
+    pa_sched_apply(&candidate, &sched);
     if (!pa_card_valid(&candidate)) {
         return false;
     }

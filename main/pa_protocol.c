@@ -1,5 +1,6 @@
 #include "pa_protocol.h"
 
+#include "pa_store.h"
 #include "passport_anki.h"
 
 #include <string.h>
@@ -53,6 +54,24 @@ static int pa_hex_value(unsigned char ch)
         return ch - 'A' + 10;
     }
     return -1;
+}
+
+static bool pa_decode_raw_hex(pa_token token, uint8_t *out, size_t capacity, size_t *out_length)
+{
+    if (token.length == 0 || (token.length & 1u) != 0 || token.length / 2 > capacity) {
+        return false;
+    }
+    size_t output_length = token.length / 2;
+    for (size_t i = 0; i < output_length; ++i) {
+        int high = pa_hex_value((unsigned char)token.bytes[i * 2]);
+        int low = pa_hex_value((unsigned char)token.bytes[i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        out[i] = (uint8_t)((high << 4) | low);
+    }
+    *out_length = output_length;
+    return true;
 }
 
 static bool pa_decode_hex(pa_token token, char *out, size_t capacity)
@@ -134,11 +153,24 @@ bool pa_protocol_parse(const char *line, size_t length, pa_protocol_command *out
         candidate.kind = PA_PROTOCOL_COMMIT;
     } else if (pa_token_equal(tokens[0], "ABORT") && count == 1) {
         candidate.kind = PA_PROTOCOL_ABORT;
-    } else if (pa_token_equal(tokens[0], "BEGIN") && count == 2) {
+    } else if (pa_token_equal(tokens[0], "RESUME") && count == 1) {
+        candidate.kind = PA_PROTOCOL_RESUME;
+    } else if (pa_token_equal(tokens[0], "BEGIN") && count == 4) {
         candidate.kind = PA_PROTOCOL_BEGIN;
-        if (!pa_parse_u32(tokens[1], &candidate.value) || candidate.value < 1 || candidate.value > PA_MAX_CARDS) {
+        if (!pa_parse_u32(tokens[1], &candidate.value) || candidate.value < 1 ||
+            candidate.value > PA_STORE_MAX_CARDS || !pa_parse_u32(tokens[2], &candidate.crc) ||
+            !pa_parse_u32(tokens[3], &candidate.length) ||
+            candidate.length < candidate.value * 11u || candidate.length > PA_STORE_PAYLOAD_MAX) {
             return false;
         }
+    } else if (pa_token_equal(tokens[0], "CHUNK") && count == 3) {
+        size_t bytes = 0;
+        if (!pa_parse_u32(tokens[1], &candidate.value) ||
+            !pa_decode_raw_hex(tokens[2], candidate.chunk, PA_PROTOCOL_CHUNK_MAX, &bytes) || bytes == 0) {
+            return false;
+        }
+        candidate.kind = PA_PROTOCOL_CHUNK;
+        candidate.length = (uint32_t)bytes;
     } else if (pa_token_equal(tokens[0], "DAY") && count == 2) {
         candidate.kind = PA_PROTOCOL_DAY;
         if (!pa_parse_u32(tokens[1], &candidate.value)) {

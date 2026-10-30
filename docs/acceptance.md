@@ -10,7 +10,7 @@
 | C11 sanitizer tests | PASS | 本次 CMake/CTest ASan+UBSan，core/codec/layout/protocol/import 5/5 |
 | Python 导入与上传测试 | PASS | 本次 pytest 20/20；上传传输使用 fake serial，未实机导入 |
 | 分页/输入协议 host 检查 | PASS | CTest layout/protocol/import；真实 LVGL 渲染仍需设备检查 |
-| 中文字库生成/覆盖 | PASS | Noto固定版本，21,509字形；缺字按manifest拒绝；生成重跑字节一致 |
+| 中文字库生成/覆盖 | PASS | Noto固定版本，21,957字形（含假名与声调圈号）；缺字按manifest拒绝 |
 | ESP32-C3 编译/size/镜像 | PASS | ESP-IDF 5.5.3 Actions；app/full/分区产物下载与内容校验通过 |
 
 ## 远端构建与镜像核对
@@ -35,7 +35,7 @@
 | 中英文换行/分页/字体 | NOT RUN |
 | 四评分和一分钟重学 | NOT RUN |
 | 评分后断电恢复 | NOT RUN |
-| 64 张电脑 USB 导入 | NOT RUN |
+| 12,000 张容量与 JLPT 牌组 USB 导入 | NOT RUN |
 | 导入中断/错误恢复/原数据保留 | NOT RUN |
 | 损坏存档报错、不擦其它 NVS | NOT RUN |
 | 最小空闲 heap、任务栈水位 | NOT RUN |

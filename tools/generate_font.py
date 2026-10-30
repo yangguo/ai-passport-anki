@@ -15,8 +15,17 @@ PINNED_FONT_PATH = "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
 PINNED_LV_FONT_CONV = "1.5.3"
 PINNED_FONT_SHA256 = "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
 CANONICAL_FONT_PATH = Path("work/font-source/NotoSansCJKsc-Regular.otf")
-REQUESTED_RANGES = ((0x0020, 0x007E), (0x00A0, 0x024F), (0x3000, 0x303F),
-                    (0x4E00, 0x9FFF), (0xFF00, 0xFFEF))
+REQUESTED_RANGES = (
+    (0x0020, 0x007E),  # ASCII
+    (0x00A0, 0x024F),  # Latin extended
+    (0x0370, 0x03FF),  # Greek (JLPT notes use α)
+    (0x2000, 0x206F),  # general punctuation (… — “ ”)
+    (0x2460, 0x24FF),  # enclosed numbers used as pitch marks (① ⓪)
+    (0x3000, 0x30FF),  # CJK punctuation, hiragana, katakana
+    (0x31F0, 0x31FF),  # katakana phonetic extensions
+    (0x4E00, 0x9FFF),  # CJK unified ideographs
+    (0xFF00, 0xFFEF),  # halfwidth/fullwidth
+)
 ROOT = Path(__file__).resolve().parents[1]
 
 

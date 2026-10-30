@@ -10,7 +10,7 @@ cmake --build build/host --target passport_sim
 ./build/host/passport_sim --state ./study.pak
 ```
 
-Omit `--state ./study.pak` to keep all changes in memory for that process only. With `--state`, a valid PAK1 snapshot is loaded on start. Updates are encoded to a same-directory temporary file and renamed into place only after writing, flushing, syncing, and closing succeed. A missing file starts an empty collection. A malformed or unreadable snapshot is rejected without replacing it.
+Omit `--state ./study.pak` to keep all changes in memory for that process only. With `--state`, a PAK2 image of the cards and schedule partitions is loaded on start. A legacy PAK1 file is migrated once and written back as PAK2. Updates go to a same-directory temporary file and are renamed into place only after writing, flushing, syncing, and closing succeed. A missing file starts an empty collection. A malformed or unreadable snapshot is rejected without replacing it. A failed rename restores the in-memory flash images so the process matches the file.
 
 Use a state path from one simulator process at a time; interprocess locking is not implemented. File `fsync` followed by rename gives atomic replacement behavior, but the simulator does not sync the parent directory. Sudden power loss can therefore lose the renamed directory entry on filesystems that require a directory sync for that guarantee.
 
@@ -49,7 +49,7 @@ The simulator accepts core-valid UTF-8 text. It does not check whether the devic
 
 ## Import protocol
 
-The existing line protocol is available for `INFO`, `BEGIN <count>`, `CARD <id> <deck_hex> <front_hex> <back_hex>`, `COMMIT`, `ABORT`, and `DAY <day>`. `CARD` fields use UTF-8 bytes encoded as hexadecimal, as produced by `tools/deck.py commands`. Import uses the existing staging transaction and replaces the collection only after persistence succeeds. Study mutations are rejected while an import transaction is open.
+The line protocol is version 2: `INFO`, `BEGIN <count> <crc> <length>`, `CHUNK <offset> <hex>`, `RESUME`, `COMMIT`, `ABORT`, and `DAY <day>`. `CHUNK` carries the canonical card records produced by `tools/deck.py`. Import replaces the collection only after the payload CRC matches and the state file is saved. Study mutations are rejected while an import transaction is open.
 
 `DAY` follows firmware semantics: it rejects a day earlier than the current study day and advances to the requested day boundary when that boundary is later than the current minute. It never changes the host system clock. `ADVANCE` may move within the current study day or across days. A due card is still due after advancing; advancing time does not mark it reviewed.
 

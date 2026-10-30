@@ -10,12 +10,12 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 
 | 功能 | v1 | 边界 |
 |---|---|---|
-| 多牌组、正反面纯文本 | 实现 | 每次导入最多 64 张，单面 UTF-8 最多 255 字节 |
+| 多牌组、正反面纯文本 | 实现 | 最多 12,000 张，单面 UTF-8 最多 511 字节，牌组名最多 47 字节 |
 | Again/Hard/Good/Easy | 实现 | 本文定义的简化调度；不是 FSRS |
-| 断电恢复 | 实现 | 成功评分必须已完成 NVS commit |
+| 断电恢复 | 实现 | 评分先把调度块写到新扇区，超级块最后发布；导入在超级块写入前不影响旧牌组 |
 | 中文显示、长文本分页 | 实现 | 覆盖中文基本区及规定字符范围；不支持 emoji/富文本 |
-| 电脑 USB 导入 | 实现 | TSV；旧式 APKG 转换；整体替换，并明确重置复习记录 |
-| 完整 APKG/Anki 集合兼容 | 不包含 | 只转换旧式 SQLite Basic 文本，不运行 Anki 模板引擎 |
+| 电脑 USB 导入 | 实现 | TSV；旧式 Basic APKG；JLPT 字段牌组。分块上传，CRC 校验后整组替换并重置复习记录 |
+| 完整 APKG/Anki 集合兼容 | 不包含 | 不运行 Anki 模板引擎；不提取媒体；anki21b 拒绝。Anki 的 i64 卡片 ID 只留在电脑映射里 |
 | 图片、音频、TTS、手写、数学公式 | 不包含 | 后续资源包设计 |
 | AnkiWeb、Wi-Fi、账号、FSRS | 不包含 | 后续独立里程碑 |
 | 自动 RTC/关机计时 | 不包含 | 离线学习时钟，用户明确推进日期 |
@@ -49,7 +49,17 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 | GUI | LVGL 9.5.x，esp_lvgl_port 2.9.0 |
 | USB | USB Serial/JTAG 控制台；不启用 UART0，避免 GPIO21 背光冲突 |
 
-分区沿用参考独立固件方案：NVS `0x9000/0x6000` 太小，必须扩大以容纳一次完整牌组及 NVS blob 更新：NVS `0x9000/0x40000`，phy `0x49000/0x1000`，factory `0x50000/0x7b0000`。分区总边界为 8 MiB。不沿用旧固件 app-only 地址；文档强调只有核对实际分区表才能做保留配置的更新。
+8 MiB 分区（`partitions.csv`）在保留原 NVS 起点的前提下为卡片正文和调度留出空间。NVS 仍是 `0x9000/0x40000`（256 KiB），这样已有设备上的 PAK1 `snapshot` 键还能读到并迁移。应用分区保持 64 KiB 对齐，起点仍是 `0x50000`，长度改为 `0x280000`（2.5 MiB）。`0x4A000..0x50000` 的空隙是应用对齐留下的，与旧表相同。
+
+| 分区 | 偏移 | 大小 | 用途 |
+|---|---:|---:|---|
+| nvs | 0x9000 | 0x40000 | 时钟无关的遗留 PAK1；迁移成功后只删 `snapshot` 键 |
+| phy_init | 0x49000 | 0x1000 | PHY |
+| factory | 0x50000 | 0x280000 | 应用，含字体 |
+| cards | 0x2D0000 | 0x460000 | 两份正文槽，每槽 0x230000 |
+| sched | 0x730000 | 0xD0000 | 超级块、导入进度、调度块池 |
+
+表尾是 `0x800000`。这不是其它项目的 app-only 地址；更新必须整表刷写，不能只覆盖旧 factory。cards 子类型 `0x40`，sched 子类型 `0x41`，固件按名字查找。
 
 ## 5. 架构与目录
 
@@ -79,17 +89,50 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 
 ## 6. 数据模型与限制
 
-`pa_collection`: `now:u32`（逻辑分钟），`count:u16`，固定数组 64 张。
+设备上的正文和调度不再放进一个 RAM 数组。`pa_collection` / `PA_MAX_CARDS 64` / PAK1 编解码仍保留，只用于主机上的旧快照和迁移，不能把这个结构扩到 12,000 张。
 
-`pa_card`: `id:u32`、`due:u32`、`interval:u16`（天）、`ease:u16`（1000 倍比例）、`reviews:u16`、`lapses:u16`、`stage:u8`、`step:u8`、`deck[48]`、`front[256]`、`back[256]`。
+运行时上限：
 
-- ID 非零、全 collection 唯一。相同牌组名表示同一牌组；最多 64 个不同牌组。
-- deck 最多 47 UTF-8 字节；front/back 最多 255 字节，均必须非空且 NUL 结尾。
-- 验证 UTF-8：拒绝截断、多余 continuation、overlong、surrogate、> U+10FFFF、文本中的内嵌 NUL。允许正文换行，拒绝非换行控制字符。
-- 空字段、越界、重复 ID、超出卡数必须给出行号/错误原因，不静默截断。
-- 新卡默认 ease=2500、interval=0、due=now、stage=NEW、step=0、计数为零。
-- 计数饱和到 UINT16_MAX，不回绕；interval 上限 3650 天；now/due 加法溢出返回失败且不修改原卡。
-- 导入整个 collection 替换；v1 不做按 ID 合并、不保留复习历史。工具在 upload 之前明确提示这种效果（用户发起上传即授权该操作）。
+| 项 | 值 |
+|---|---|
+| 卡片 | 12,000（`PA_STORE_MAX_CARDS`）。目标牌组 10,641 张，留有余量 |
+| 牌组 | 64。牌组名最多 47 UTF-8 字节，使用完整牌组路径，避免叶子名相撞 |
+| 单面 | 511 UTF-8 字节，缓冲 512 含 NUL。超出即拒绝，不截断 |
+| 设备 ID | 非零 u32，一次导入内唯一。电脑按 `cards.id` 顺序编成 1..n；Anki 的 i64 只写在可选 `--map` JSON，不进设备 |
+| 正文镜像 | 每个槽的 payload 上限是 `0x200000`（2,097,152 字节）。主机必须在放不下时失败 |
+
+UTF-8 规则不变：拒绝截断、多余 continuation、overlong、surrogate、大于 U+10FFFF、内嵌 NUL。正文允许换行，拒绝其它控制字符。空字段、重复 ID、超限都报错。
+
+新卡默认 ease=2500、interval=0、due=now、stage=NEW、step=0。计数饱和到 UINT16_MAX。interval 上限 3650 天。now/due 加法溢出则失败且不改原记录。USB 导入替换整组并清零复习历史；从 PAK1 迁移时按原调度字段搬入。工具在 upload 前说明替换效果。
+
+### 6.1 正文分区
+
+`cards` 分成两个等大槽。槽 0 的头在分区起点。每个槽：
+
+- 4 KiB 头：magic `PCT1`，version u16=1，count，epoch，payload 偏移/长度/CRC，索引 CRC，牌组数，头 32 字节的 CRC32（IEEE，与 `pa_crc32` 相同）。
+- 紧随其后的牌组名，每名 48 字节含 NUL。
+- 索引从 4 KiB 对齐的 `PA_INDEX_OFF` 开始。每条 16 字节：id、front 偏移、front 长度、back 长度、back 偏移。12000 条向上取整到扇区后，payload 从 `0x30000` 开始。
+- payload 是主机发来的规范记录流，不在设备上再打包。记录为小端：`id:u32, deck_len:u8, front_len:u16, back_len:u16, bytes`。
+
+读一张卡只读 16 字节索引和两侧正文，不把牌组载入 RAM。挂载时按扇区分段核对索引 CRC 和 payload CRC。
+
+### 6.2 调度分区
+
+`sched` 前 4 个扇区是元数据，其余是池（本表 204 个扇区，代码上限 240）。
+
+- 扇区 0 和 1：超级块 `PSS2`，version=2。双槽轮换，读 generation 较大且 CRC 通过的一份。字段：count、now、epoch、活动槽、牌组数。
+- 扇区 2 和 3：导入进度 `PIM1`。记录已落到 flash 的 payload 偏移（满扇区，或最后一块不足扇区但已写完）。RAM 里未刷出的尾部在重启后丢弃。
+- 池内每块 4 KiB，magic `PSCH`。头 32 字节含 generation、擦除计数、epoch、块号、记录数、记录区 CRC。每条调度记录 20 字节，一块 203 条。12,000 张需要 60 块。
+
+到期队列按块流式扫描：先 LEARNING，再 REVIEW，再 NEW，然后 due 升序、id 升序。不把 12,000 条抄进 RAM。
+
+评分把改过的那一块写到擦除次数最低的空闲扇区，块头 CRC 最后写入。成功后这块的 generation 更高；断电时旧块仍在，挂载会选 generation 最大的有效块。超级块的 now 更新是尽力而为，块写入才是评分的提交点。多次评分同一张卡会在空闲扇区之间轮换，不会反复擦同一扇区。导入时池里要同时放下旧 epoch 和新 epoch 的块（最多 120）以及余量。
+
+导入发布顺序：写索引、写新 epoch 的调度块、写槽头、最后写超级块，然后清进度。超级块写入之前崩溃，旧牌组仍是活动牌组。显式导入可以覆盖 `PA_STORE_CORRUPT`；不会因为挂载失败去擦 NVS。
+
+### 6.3 从 PAK1 迁移
+
+仅当新存储挂载为 `EMPTY` 时，读取 NVS namespace `pa_anki`、key `snapshot`。用现有 `pa_decode` 校验 magic `PAK1`、version 1 和 CRC。空快照只发布超级块。非空快照经 `pa_store_import_collection` 写入，并沿用原 due/ease/interval/stage。成功后 `nvs_erase_key("snapshot")` 并 commit。解码失败则保留该键，不调用 `nvs_flash_erase`。已经是 CORRUPT 的 v2 存储不会被自动迁移覆盖，只能由用户重新导入。模拟器遇到 PAK1 文件同样迁移成 PAK2。
 
 ## 7. 调度算法（精确定义）
 
@@ -104,7 +147,7 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 
 计算使用整数和足够宽的中间值。ease 范围 1300..3500。间隔上限 3650 天，达到上限时 Hard/Good/Easy 可以相同，不伪称严格递增。Again 后重新完成学习时按1天毕业（简化遗忘策略）。评分结果先在候选 card 上计算，验证成功再赋值。
 
-`pa_next(collection, deck)`：选 `due <= now` 的匹配卡；LEARNING 优先，其次 REVIEW，最后 NEW；同一类别按 due 升序、id 升序。没有匹配返回 `PA_NO_CARD`。首版无每日新卡限额；64张上限控制总量。
+选卡规则不变：`due <= now`；LEARNING 优先，其次 REVIEW，最后 NEW；同一类别按 due 升序、id 升序。没有匹配返回 `PA_NO_CARD`。没有每日新卡限额；12,000 张是总量上限。闪存实现按调度块扫描，比较规则与 `pa_next` 相同。评分先在 `pa_sched` 候选上计算，通过 `pa_sched_valid` 后才写入新块。
 
 会话 `pa_session` 包含 current index/revealed。评分必须当前卡有效、已翻面、rating 0..3；成功后关闭 revealed，不能连按 OK 重复给同一卡评分。
 
@@ -123,13 +166,13 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 | IMPORTING | 忽略 | 忽略 | 中止事务 |
 | ERROR | 无业务变更 | 重试/返回 | 返回安全首页 |
 
-每屏显示牌组、逻辑 day、当前卡/总数、Q/A、页码、操作提示。答案不能靠 UP/DOWN 无意泄露。长文本必须按 UTF-8 字符边界和字体宽度自动换行后分页；不能把 CJK 字节硬切。正文最大255字节，固定页索引数组足够；中文、英文长单词、换行都要测试。
+每屏显示牌组、逻辑 day、当前卡/总数、Q/A、页码、操作提示。答案不能靠 UP/DOWN 无意泄露。长文本必须按 UTF-8 字符边界和字体宽度自动换行后分页；不能把 CJK 字节硬切。正文最大 511 字节。分页按 UTF-8 边界和字体宽度换行；中文、假名、英文长单词和换行都要测。每屏最多 4 行，页数上限 64，511 字节能放下。
 
 没有到期卡显示“本次已完成”及等待/推进学习日入口，不自动推进一天以凑下一张。Again 的一分钟到期要由开机计时器触发刷新，无需离开页面。
 
 ## 9. 字体与字符覆盖
 
-生成 Noto Sans SC 16px、2bpp、const flash 字体。目标范围为 ASCII U+0020..007E、拉丁扩展 U+00A0..024F、中文标点 U+3000..303F、中文基本区 U+4E00..9FFF、全角/半角 U+FF00..FFEF；换行无 glyph。实际字形覆盖以 assets/fonts/pa_font_16.manifest.json 为准：上游字体本身缺少的码点不生成，导入工具和设备拒绝缺字。输出 C 文件和覆盖清单；保留上游 OFL 与固定字体来源提交。
+生成 Noto Sans SC 16px、2bpp、const flash 字体。请求范围在原有 ASCII、拉丁扩展、中文基本区和全角之外，增加希腊字母 U+0370..03FF、通用标点 U+2000..206F、带圈数字 U+2460..24FF、假名区 U+3000..30FF 和片假名扩展 U+31F0..31FF，用来显示 JLPT 牌组里的假名、声调圈号、省略号和 α。换行无 glyph。上游字体没有的码点不生成。清单记录请求 22,447、实际 21,957、缺失 490。`tools/deck.py` 只按这份清单拒绝缺字，不再用一份更窄的硬编码区间。设备在 COMMIT 时再用字体度量复检，缺字整组失败。
 
 不把字体加载到 RAM。首版可先用内置 ASCII 字体通过编译，但交付中文能力必须实际生成并构建中文字体。若完整字库超过 flash 预算，改用明确的子集并由导入工具拒绝缺字，不能以方框显示伪装中文支持。字体生成失败不得阻塞全部 host 开发，但必须标为验收缺项。
 
@@ -141,34 +184,39 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 
 ## 11. 存档与断电一致性
 
-namespace `pa_anki`，key `snapshot`，blob 由 portable codec 编码。NVS init 失败显示错误，不调用 nvs_flash_erase。
+卡片正文和调度在 `cards` / `sched` 分区，不放进一个 NVS blob。NVS 只承接遗留 PAK1。`nvs_flash_init` 失败时记录错误，不调用 `nvs_flash_erase`，新分区仍可导入。
 
-快照采用小端：magic `PAK1`，version u16=1，count u16，now u32；随后每张卡按本文数据字段顺序编码，字符串按 u16字节长度+UTF-8内容（不含NUL）；末尾 CRC32（IEEE）。不把原生C struct直接写入 flash。
+PAK1（magic `PAK1`，version 1，末尾 CRC32）仍是迁移输入。解码失败时目标数据不变。满载旧快照约 37 KiB，放得进保留的 256 KiB NVS。迁移细节见 6.3。
 
-解码先检查总长度、magic/version/count、CRC和每个字段，再检查重复ID、stage/step/ease/interval等不变量。失败时目标 collection 完全不变。避免36KiB局部变量压栈：采用两遍校验再提交，或明确调用者提供静态 staging。
+评分：读出当前调度块，在候选 `pa_sched` 上计算，写到新扇区。写失败则 RAM 映射不变，界面保留答案和选择。写成功才进入下一张。超级块更新失败不把这次评分判成失败，因为新块已经带有更高的 generation，重新挂载仍能看到它。
 
-评分：备份旧 card → 计算候选 → encode & nvs_set_blob & nvs_commit → 成功才显示已评分/进入下一张；失败恢复旧 card，保留答案和选择，可重试。导入：staging校验 → persist staging → swap live，任何失败继续使用原 collection。启动 corrupt blob 不自动覆盖；显示“存档损坏”并只允许明确导入替换或保留错误状态。
+导入：数据先进入非活动槽。进度扇区只记录已经写完的扇区。COMMIT 重读 payload、核对 CRC、拒绝重复 ID，再发布。发布前断电保留旧牌组。CRC 或文本不合法则不写超级块。损坏的 v2 存储显示错误，只接受明确的新导入。
 
-NVS空间需求：最大序列化约37KiB，更新期间旧/新 blob 可能共存，256KiB NVS提供页/索引余量。若 nvs_set_blob/commit 返回空间错误，报告失败，不擦除别的 namespace。
+模拟器把两份分区镜像存成 PAK2（magic、version 2、两段长度、两段拼接的 CRC32），临时文件 fsync 后 rename。垃圾文件直接拒绝，不覆盖。保存失败时把进程内镜像恢复到写入前并重新挂载。
 
 ## 12. 电脑导入格式与协议
 
 规范 TSV：UTF-8（允许 BOM），标题 `id\tdeck\tfront\tback`。使用 Python csv delimiter=tab，支持引用字段内的真实换行；ID 十进制1..UINT32_MAX。可支持 Anki文本导出（前/后两列，#分隔符/HTML注释），规范化由工具完成。
 
-旧式 APKG：仅打开 zip 内 `collection.anki2` / `collection.anki21` SQLite；不提取任意路径，不执行SQL扩展或模板脚本。Basic模型取前两个文本字段；HTML用标准库解析成纯文本，保留 `<br>` 换行；Cloze/自定义复杂模型明确拒绝或说明有限转换，不能伪造完整卡片展开。压缩 collection.anki21b、媒体与新式包提示不支持，并建议从 Anki 导出 UTF-8 TSV。
+旧式 APKG：只读 zip 内的 SQLite。同时存在 `collection.anki21` 和较小的 `collection.anki2` 时用 anki21（JLPT 包里的 anki2 是空壳）。`collection.anki21b` 直接拒绝。不解压媒体，不执行 SQL 扩展或模板脚本。Basic 模型取前两个文本字段。字段名含 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组按 JLPT 规则转换：正面是词条，若注音不同再加一行；背面依次放声调、词性、简体释义、补充、第一条例句注音和简体例句释义。先去掉 `[sound:...]` 和图片标签，HTML 转成纯文本并保留 `<br>` 换行，再把 `汉字[假名]` 收成 `汉字（假名）`。背面超过 511 字节时先丢掉补充，再丢掉例句释义，仍然超出就报错，不截断。Cloze 和其它模型拒绝。一台笔记多张卡拒绝。
 
 行协议 ASCII，正文 hex编码UTF-8；最大行1200字节，串口输入超过上限必须丢弃整个行并报错。reader遇到断线/半行不能重复上一命令。
 
+协议 version 2。正文不再一行一张卡，而是规范记录的二进制分块。每块最多 480 字节，hex 后仍低于 1200 字节行长。`zlib.crc32` 与设备 `pa_crc32` 对同一 payload 结果相同。
+
 ```text
-INFO                  -> OK INFO version=1 cards=N day=N
-BEGIN N               -> OK BEGIN       # 1..64；清空 staging；暂停复习
-CARD ID DECKHEX FRONTHEX BACKHEX -> OK CARD
-COMMIT                -> OK COMMIT      # 收到恰好 N 张且 NVS commit成功
-ABORT                 -> OK ABORT
-DAY N                 -> OK DAY         # 非事务期间，单调前进
+INFO                              -> OK INFO version=2 cards=N day=D cap=12000
+BEGIN count crc length            -> OK BEGIN resume=N
+CHUNK offset hex                  -> OK CHUNK accepted
+RESUME                            -> OK RESUME offset=N count=N crc=N length=N
+COMMIT                            -> OK COMMIT
+ABORT                             -> OK ABORT
+DAY N                             -> OK DAY
 ```
 
-错误统一 `ERR <code>`；不在 payload 含日志换行。COMMIT失败不能回 OK；CARD失败使事务失效或明确允许重试，工具遇ERR必须ABORT。BEGIN中再次BEGIN拒绝；缺卡COMMIT拒绝；断线事务60秒无输入自动ABORT；按键长OK允许中止。最大队列 4 条，串口忙需发送ERR BUSY，工具必须逐条等对应ACK，不把BSP/ESP日志误识别为ACK。
+`resume` 是已经落盘的偏移；同一进程里若还有未刷出的尾部，RESUME 会把这段也算进去。主机从该偏移继续，不盲目重发旧偏移。BEGIN 在设备重启后可以接上同一 count/crc/length 的进度。块确认丢失时先 RESUME，对不上才 ABORT。COMMIT 在 payload 到齐且 CRC、牌组数、字体都通过后才回答 OK。解析器仍接受旧的 CARD 行，固件和模拟器不把它当作导入路径。
+
+错误仍是 `ERR <code>`。COMMIT 失败不能回 OK。再次 BEGIN 在事务未结束时拒绝。60 秒无输入自动 ABORT。长按 OK 可中止。队列仍是 4 条，忙则 `ERR BUSY`。工具逐条等 ACK，不把启动日志当成 ACK。
 
 导入脚本：`inspect input.tsv` 验证并统计；`commands input.tsv --output deck.commands` 离线导出；`upload input.tsv --port /dev/cu.usbmodem...`（pyserial可选依赖）串行执行，校验所有ACK，只有 OK COMMIT 才报告成功。超时/ERR报告失败，尝试ABORT。先INFO检查协议版本。
 
@@ -176,16 +224,17 @@ DAY N                 -> OK DAY         # 非事务期间，单调前进
 
 | 项目 | 预算/要求 |
 |---|---|
-| live collection | 约37KiB，静态 |
-| staging collection | 约37KiB，静态，复用解码/导入 |
-| codec buffer | 40KiB，静态，禁止大栈数组 |
-| 消息队列/串口行 | 约6KiB；消息长度<=1200 |
-| app task | 8..12KiB 栈，实测水位后调整 |
-| LVGL | pool 24KiB，显示缓冲沿用 BSP |
-| 字体 | flash const，目标<=3MiB |
-| app flash | <factory 0x7b0000；CI 检查 |
-| 核心 | 无 malloc/rand/system clock；一次选卡O(64) |
-| 响应 | 目标短按到画面<150ms；需真机测量，不能用编译PASS代替 |
+| `pa_store` | 静态一份，含 4 KiB 扇区缓冲和 64 个牌组名。编译期不超过 12 KiB；当前结构 7,840 字节 |
+| 当前卡文本 | 正面、背面各 512 字节，牌组名 48 字节 |
+| 提交时临时堆 | id 数组加牌组名表，高水位必须 `<= 64 KiB`，返回后为 0 |
+| 稳态选卡/评分 | 不再 malloc |
+| 消息队列/串口行 | 约 6 KiB；行长 <= 1200 |
+| app task | 16 KiB 栈。挂载和读块用 `pa_store` 里的扇区缓冲，不在栈上再放 4 KiB |
+| LVGL | pool 24 KiB，显示缓冲沿用 BSP |
+| 字体 | flash const。假名和圈号大约增加几百个字形 |
+| app flash | 必须小于 factory `0x280000`；CI 检查 |
+| 选卡 | 按调度块扫描，块数最多 60，不随卡数把对象放进 RAM |
+| 响应 | 目标短按到画面 <150ms；需真机测量，不能用编译 PASS 代替 |
 
 最大配置可能接近C3 RAM上限：固件size和启动heap日志必需；若余量不足优先缩减静态双份临时缓冲/限制卡数，须同步工具、文档、测试，不能悄悄降低规格。
 
@@ -195,7 +244,7 @@ DAY N                 -> OK DAY         # 非事务期间，单调前进
 
 固件：ESP-IDF 5.5.3 build、size、merge-bin、分区边界。CI产物至少 app.bin、bootloader.bin、partition-table.bin、full.bin、构建与size记录，不把full.bin自动刷到用户设备。
 
-真机项全部初始 NOT RUN：开机屏幕/圆角、ADC三键、中文/分页、评分后断电恢复、Again 1min重现、DAY推进、64张USB导入、导入中断原数据保留、坏CRC错误、堆/栈余量、30min稳定复习、电量/电源行为。没有实机证据不能标“移植完全验收”。
+真机项保持 NOT RUN：开机屏幕/圆角、ADC 三键、假名与长文分页、评分后断电恢复、Again 1 分钟重现、DAY 推进、万张 USB 导入、导入中断原数据保留、坏 CRC、堆/栈余量、30 分钟稳定复习、电量/电源。主机上的断电测试只模拟扇区写入失败和超级块未发布，不能代替真机掉电。没有实机证据不能标“移植完全验收”。
 
 ## 15. 里程碑与交付
 

@@ -1,4 +1,8 @@
 # Name,   Type, SubType, Offset,   Size,     Flags
+# NVS stays 256 KiB so a legacy PAK1 snapshot can be migrated. Factory stays 64 KiB-aligned.
+# The 0x4A000..0x50000 gap is required by the app alignment, same as the previous map.
 nvs,      data, nvs,     0x9000,   0x40000,
 phy_init, data, phy,     0x49000,  0x1000,
-factory,  app,  factory, 0x50000,  0x7b0000,
+factory,  app,  factory, 0x50000,  0x280000,
+cards,    data, 0x40,    0x2D0000, 0x460000,
+sched,    data, 0x41,    0x730000, 0xD0000,

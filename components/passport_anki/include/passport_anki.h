@@ -28,6 +28,15 @@ void pa_begin(pa_session *s, const pa_collection *c, const char *deck);
 bool pa_flip(pa_session *s);
 bool pa_grade(pa_collection *c, pa_session *s, pa_rating rating);
 bool pa_advance(pa_collection *c, uint32_t minutes);
+
+/* Scheduling fields without card text. The flash store grades one record at a time. */
+typedef struct {
+    uint32_t id, due;
+    uint16_t interval, ease, reviews, lapses;
+    uint8_t stage, step;
+} pa_sched;
+bool pa_sched_valid(const pa_sched *card);
+bool pa_grade_sched(pa_sched *card, uint32_t now, pa_rating rating);
 size_t pa_encode(const pa_collection *c, uint8_t *out, size_t cap);
 bool pa_decode(pa_collection *out, const uint8_t *data, size_t size);
 uint32_t pa_crc32(const uint8_t *data, size_t size);
