@@ -41,6 +41,7 @@ class Card:
     front: str
     back: str
     anki_id: str = ""
+    anki_note_id: str = ""
 
 
 class _PlainText(html.parser.HTMLParser):
@@ -121,7 +122,7 @@ def _validate_card(card: Card, row: int) -> Card:
     card = Card(card.id, card.deck.replace("\r\n", "\n").replace("\r", "\n"),
                 card.front.replace("\r\n", "\n").replace("\r", "\n"),
                 card.back.replace("\r\n", "\n").replace("\r", "\n"),
-                card.anki_id)
+                card.anki_id, card.anki_note_id)
     if not isinstance(card.id, int) or isinstance(card.id, bool) or not 1 <= card.id <= UINT32_MAX:
         raise DeckError(f"row {row}: id must be in range 1..{UINT32_MAX}")
     if not card.deck:
@@ -146,7 +147,7 @@ def _finish(cards: list[Card]) -> list[Card]:
     if not cards:
         raise DeckError("deck has no cards")
     if len(cards) > MAX_CARDS:
-        raise DeckError(f"deck exceeds {MAX_CARDS} cards")
+        raise DeckError(f"deck exceeds {MAX_CARDS} cards (got {len(cards)})")
     seen: set[int] = set()
     normalized: list[Card] = []
     for row, card in enumerate(cards, 1):
@@ -295,6 +296,97 @@ def _jlpt_sides(fields: list[str], mapping: dict[str, int], note_id: int) -> tup
     return front, back
 
 
+def card_from_note(model: dict, fields: list[str], deck_name: str, note_id: int, anki_card_id: int,
+                   device_id: int) -> Card:
+    """Map one Anki note onto a device card. Basic and JLPT fields only; Cloze is rejected."""
+    name = str(model.get("name", ""))
+    kind = int(model.get("type", -1))
+    if kind == 1 or name.lower() == "cloze" or any("{{c" in field.lower() for field in fields):
+        raise DeckError(f"Cloze note {note_id} is unsupported")
+    if _is_jlpt_model(model):
+        front, back = _jlpt_sides(fields, _field_map(model), note_id)
+    elif kind == 0 and name == "Basic":
+        if len(fields) < 2:
+            raise DeckError(f"Basic note {note_id} must have at least two text fields")
+        front, back = _clean_field(fields[0]), _clean_field(fields[1])
+    else:
+        raise DeckError(f"custom model {name!r} is unsupported; only Basic and JLPT fields are converted")
+    return Card(device_id, deck_name, front, back, str(int(anki_card_id)), str(int(note_id)))
+
+
+def _table_names(connection: sqlite3.Connection) -> set[str]:
+    try:
+        rows = connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    except sqlite3.Error as exc:
+        raise DeckError(f"collection schema cannot be read: {exc}") from exc
+    return {str(row[0]) for row in rows}
+
+
+def _selected_cards(connection: sqlite3.Connection, only_decks: set[str] | None, *, schema18: bool) -> list[Card]:
+    try:
+        if schema18:
+            decks = {int(row["id"]): str(row["name"]) for row in connection.execute("SELECT id, name FROM decks")}
+            notetypes = {int(row["id"]): str(row["name"]) for row in connection.execute("SELECT id, name FROM notetypes")}
+            field_names: dict[int, list[str]] = {}
+            for row in connection.execute("SELECT ntid, ord, name FROM fields ORDER BY ntid, ord"):
+                field_names.setdefault(int(row["ntid"]), []).append(str(row["name"]))
+            models = {
+                ntid: {"name": name, "type": 1 if "cloze" in name.lower() else 0,
+                       "flds": [{"name": field} for field in field_names.get(ntid, [])]}
+                for ntid, name in notetypes.items()
+            }
+        else:
+            collection = connection.execute("SELECT models, decks FROM col LIMIT 1").fetchone()
+            if collection is None:
+                raise DeckError("collection has no metadata row")
+            models = {int(key): model for key, model in json.loads(collection["models"]).items()}
+            decks = {int(key): str(value.get("name", "")) for key, value in json.loads(collection["decks"]).items()}
+        notes = {int(row["id"]): row for row in connection.execute("SELECT id, mid, flds FROM notes")}
+        if only_decks is None:
+            total = int(connection.execute("SELECT COUNT(*) FROM cards").fetchone()[0])
+            if total > MAX_CARDS:
+                raise DeckError(f"deck exceeds {MAX_CARDS} cards (got {total})")
+        cards: list[Card] = []
+        seen_notes: set[int] = set()
+        query = "SELECT id AS cid, nid, did FROM cards ORDER BY id"
+        for row in connection.execute(query):
+            deck_name = decks.get(int(row["did"]))
+            if deck_name is None:
+                raise DeckError(f"card {row['cid']} references a missing deck")
+            if only_decks is not None and deck_name not in only_decks:
+                continue
+            note_id = int(row["nid"])
+            if note_id in seen_notes:
+                raise DeckError("multiple cards from one note are unsupported")
+            seen_notes.add(note_id)
+            note = notes.get(note_id)
+            if note is None:
+                raise DeckError(f"card {row['cid']} references a missing note")
+            model = models.get(int(note["mid"]))
+            if not model:
+                raise DeckError(f"note {note_id} references a missing model")
+            fields = str(note["flds"]).split("\x1f")
+            cards.append(card_from_note(model, fields, deck_name, note_id, int(row["cid"]), len(cards) + 1))
+    except DeckError:
+        raise
+    except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError) as exc:
+        raise DeckError(f"unsupported or invalid collection schema: {exc}") from exc
+    if not cards:
+        raise DeckError("deck has no cards")
+    return _finish(cards)
+
+
+def read_sqlite_collection(connection: sqlite3.Connection, only_decks: set[str] | None = None) -> list[Card]:
+    """Read Basic/JLPT cards from a schema 11 or schema 18 collection. SQL errors stop the read."""
+    tables = _table_names(connection)
+    if "notes" not in tables or "cards" not in tables:
+        raise DeckError("collection schema has no notes/cards tables")
+    schema18 = {"notetypes", "fields", "decks"} <= tables
+    if not schema18 and "col" not in tables:
+        raise DeckError("collection schema has neither notetypes nor col.models")
+    return _selected_cards(connection, only_decks, schema18=schema18)
+
+
 def _read_apkg(path: Path) -> list[Card]:
     database = _apkg_database(path)
     if len(database) > APKG_DB_MAX_BYTES:
@@ -306,54 +398,13 @@ def _read_apkg(path: Path) -> list[Card]:
             connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             connection.row_factory = sqlite3.Row
             try:
-                collection = connection.execute("SELECT models, decks FROM col LIMIT 1").fetchone()
-                if collection is None:
-                    raise DeckError("APKG collection has no metadata")
-                models = json.loads(collection["models"])
-                decks = json.loads(collection["decks"])
-                notes = {int(row["id"]): row for row in connection.execute("SELECT id, mid, flds FROM notes")}
-                model_by_id = {int(key): model for key, model in models.items()}
-                total = int(connection.execute("SELECT COUNT(*) FROM cards").fetchone()[0])
-                if total > MAX_CARDS:
-                    raise DeckError(f"APKG exceeds {MAX_CARDS} cards")
-                cards: list[Card] = []
-                seen_notes: set[int] = set()
-                query = "SELECT id AS cid, nid, did FROM cards ORDER BY id"
-                for index, row in enumerate(connection.execute(query), 1):
-                    note_id = int(row["nid"])
-                    if note_id in seen_notes:
-                        raise DeckError("multiple APKG cards from one note are unsupported")
-                    seen_notes.add(note_id)
-                    note = notes.get(note_id)
-                    if note is None:
-                        raise DeckError(f"APKG card {row['cid']} references a missing note")
-                    model = model_by_id.get(int(note["mid"]))
-                    if not model:
-                        raise DeckError(f"APKG note {note_id} references a missing model")
-                    name = str(model.get("name", ""))
-                    kind = int(model.get("type", -1))
-                    if kind == 1 or name.lower() == "cloze":
-                        raise DeckError("Cloze APKG notes are unsupported")
-                    fields = str(note["flds"]).split("\x1f")
-                    deck_obj = decks.get(str(row["did"]))
-                    if not deck_obj:
-                        raise DeckError(f"APKG card {row['cid']} references a missing deck")
-                    if _is_jlpt_model(model):
-                        front, back = _jlpt_sides(fields, _field_map(model), note_id)
-                    elif kind == 0 and name == "Basic":
-                        if len(fields) < 2:
-                            raise DeckError(f"Basic APKG note {note_id} must have at least two text fields")
-                        front, back = _clean_field(fields[0]), _clean_field(fields[1])
-                    else:
-                        raise DeckError(f"custom APKG model {name!r} is unsupported; only Basic is converted")
-                    cards.append(Card(index, str(deck_obj.get("name", "")), front, back, str(int(row["cid"]))))
+                return read_sqlite_collection(connection)
             finally:
                 connection.close()
     except DeckError:
         raise
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+    except (OSError, sqlite3.Error) as exc:
         raise DeckError(f"unsupported or invalid legacy APKG collection: {exc}") from exc
-    return _finish(cards)
 
 
 def load_deck(filename: str | Path) -> list[Card]:
@@ -379,9 +430,36 @@ def payload_for(cards: Sequence[Card]) -> bytes:
     return b"".join(pack_card(card) for card in cards)
 
 
+def write_tsv(cards: Sequence[Card], path: str | Path) -> None:
+    with Path(path).open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(["id", "deck", "front", "back"])
+        for card in cards:
+            writer.writerow([card.id, card.deck, card.front, card.back])
+
+
+def write_map(cards: Sequence[Card], path: str | Path, *, source: str = "file",
+              imported_at_ms: int | None = None, decks: list[str] | None = None) -> None:
+    document = {
+        "version": 1,
+        "source": source,
+        "decks": decks if decks is not None else sorted({card.deck for card in cards}),
+        "imported_at_ms": imported_at_ms,
+        "note": "Local map from device u32 ids to Anki card ids. Do not commit.",
+        "cards": {
+            str(card.id): {
+                "anki_card_id": card.anki_id or str(card.id),
+                "anki_note_id": card.anki_note_id,
+                "deck": card.deck,
+            }
+            for card in cards
+        },
+    }
+    Path(path).write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def _write_map(cards: Sequence[Card], path: str | Path) -> None:
-    mapping = {str(card.id): card.anki_id or str(card.id) for card in cards}
-    Path(path).write_text(json.dumps(mapping, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_map(cards, path, source="file")
 
 
 def commands_for(cards: Sequence[Card], day: int | None = None) -> list[str]:
@@ -448,6 +526,16 @@ def _read_reply(serial_port, command: str, expected: str, timeout: float) -> str
                 return reply
         elif expected == "RESUME":
             if re.fullmatch(r"OK RESUME offset=\d+ count=\d+ crc=\d+ length=\d+", reply):
+                return reply
+        elif expected in ("EXPORT", "XRESUME"):
+            if re.fullmatch(
+                r"OK (?:EXPORT|XRESUME) cards=\d+ revlog=\d+ crc=\d+ length=\d+ "
+                r"epoch=\d+ dropped=\d+ now=\d+ offset=\d+",
+                reply,
+            ):
+                return reply
+        elif expected == "XCHUNK":
+            if re.fullmatch(r"OK XCHUNK \d+ [0-9a-fA-F]*", reply):
                 return reply
         elif reply == expected:
             return reply
@@ -560,7 +648,46 @@ def _parser() -> argparse.ArgumentParser:
             sub.add_argument("--commit-timeout", type=float, default=120.0)
             sub.add_argument("--day", type=int)
             sub.description = "Upload replaces all device cards and resets their review history."
+    decks = subparsers.add_parser("anki-decks", help="list decks in a local Anki collection")
+    pull = subparsers.add_parser("anki-pull", help="read Basic/JLPT cards from local Anki and write a TSV")
+    sync = subparsers.add_parser("sync-back", help="replay device grades through AnkiConnect answerCards")
+    for sub in (decks, pull, sync):
+        sub.add_argument("--url", default=None, help="AnkiConnect URL, default http://127.0.0.1:8765 when no collection is given")
+        sub.add_argument("--api-key", default=None, help="AnkiConnect API key; this is not an AnkiWeb password")
+    decks.add_argument("--collection", type=Path, help="read-only collection.anki2 or collection.anki21")
+    pull.add_argument("--deck", action="append", required=True, help="deck name; repeat to select more than one")
+    pull.add_argument("--output", required=True, type=Path)
+    pull.add_argument("--map", type=Path, help="device id to Anki card id JSON; user data, not for git")
+    pull.add_argument("--collection", type=Path, help="read-only collection.anki2 or collection.anki21")
+    pull.add_argument("--upload", action="store_true", help="upload the TSV over the v2 chunked USB protocol")
+    pull.add_argument("--port")
+    pull.add_argument("--baudrate", type=int, default=115200)
+    pull.add_argument("--timeout", type=float, default=5.0)
+    pull.add_argument("--commit-timeout", type=float, default=120.0)
+    pull.add_argument("--day", type=int)
+    sync.add_argument("--map", required=True, type=Path)
+    sync.add_argument("--port", required=True)
+    sync.add_argument("--receipt", type=Path, help="idempotency receipt; default is the map path plus .receipt.json")
+    sync.add_argument("--dry-run", action="store_true", help="print the grades that would be sent and do not call Anki")
+    sync.add_argument("--baudrate", type=int, default=115200)
+    sync.add_argument("--timeout", type=float, default=5.0)
     return parser
+
+
+def _anki_sync():
+    import importlib.util
+    name = "anki_sync"
+    loaded = sys.modules.get(name)
+    if loaded is not None:
+        return loaded
+    path = Path(__file__).with_name("anki_sync.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise DeckError("anki_sync.py is missing")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -583,11 +710,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Running these commands replaces the device collection and resets review history.")
             if args.map:
                 _write_map(cards, args.map)
-        else:
+        elif args.action == "upload":
             upload(args.input, args.port, day=args.day, command_timeout=args.timeout,
                    commit_timeout=args.commit_timeout, baudrate=args.baudrate)
             if args.map:
                 _write_map(load_deck(args.input), args.map)
+        elif args.action == "anki-decks":
+            names = _anki_sync().list_decks(sys.modules[__name__], url=args.url, collection=args.collection,
+                                            api_key=args.api_key)
+            for name in names:
+                print(name)
+        elif args.action == "anki-pull":
+            if args.upload and not args.port:
+                raise DeckError("anki-pull --upload requires --port")
+            cards, source, imported_at_ms = _anki_sync().pull_decks(
+                sys.modules[__name__], args.deck, url=args.url, collection=args.collection,
+                api_key=args.api_key, map_path=args.map,
+            )
+            write_tsv(cards, args.output)
+            print(f"Wrote {len(cards)} cards to {args.output}")
+            if args.map:
+                write_map(cards, args.map, source=source, imported_at_ms=imported_at_ms, decks=list(args.deck))
+                print(f"Wrote id map to {args.map}")
+            if args.upload:
+                upload(args.output, args.port, day=args.day, command_timeout=args.timeout,
+                       commit_timeout=args.commit_timeout, baudrate=args.baudrate)
+        else:
+            result = _anki_sync().sync_back(
+                sys.modules[__name__], port=args.port, url=args.url or "http://127.0.0.1:8765",
+                api_key=args.api_key, map_path=args.map, receipt_path=args.receipt, dry_run=args.dry_run,
+                baudrate=args.baudrate, timeout=args.timeout,
+            )
+            if result.conflicts or result.dropped:
+                return 2
     except (DeckError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

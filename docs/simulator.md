@@ -49,7 +49,7 @@ The simulator accepts core-valid UTF-8 text. It does not check whether the devic
 
 ## Import protocol
 
-The line protocol is version 2: `INFO`, `BEGIN <count> <crc> <length>`, `CHUNK <offset> <hex>`, `RESUME`, `COMMIT`, `ABORT`, and `DAY <day>`. `CHUNK` carries the canonical card records produced by `tools/deck.py`. Import replaces the collection only after the payload CRC matches and the state file is saved. Study mutations are rejected while an import transaction is open.
+The line protocol is version 2: `INFO`, `BEGIN <count> <crc> <length>`, `CHUNK <offset> <hex>`, `RESUME`, `COMMIT`, `ABORT`, `DAY <day>`, `EXPORT`, `XCHUNK <offset>`, and `XRESUME`. `CHUNK` carries the canonical card records produced by `tools/deck.py`. Import replaces the collection only after the payload CRC matches and the state file is saved. Study mutations are rejected while an import transaction is open. `EXPORT` starts a read-only snapshot of the schedule records and the on-device review log. `XCHUNK` returns up to 480 bytes of that image. A grade during an export invalidates it; `XRESUME` reports the CRC, length, epoch, and how many review records the snapshot contains. Import clears the review log.
 
 `DAY` follows firmware semantics: it rejects a day earlier than the current study day and advances to the requested day boundary when that boundary is later than the current minute. It never changes the host system clock. `ADVANCE` may move within the current study day or across days. A due card is still due after advancing; advancing time does not mark it reviewed.
 
@@ -62,5 +62,5 @@ cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON
 cmake --build build/host --parallel
 ctest --test-dir build/host --output-on-failure
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest tests/test_deck.py tests/test_simulator.py -q
+python3 -m pytest tests/test_deck.py tests/test_anki_sync.py tests/test_simulator.py -q
 ```

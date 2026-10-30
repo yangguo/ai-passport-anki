@@ -319,6 +319,67 @@ static void test_duplicate_rejected(void)
     puts("store: duplicate id rejected without publishing PASS");
 }
 
+static void test_revlog_export_roundtrip(void)
+{
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store store;
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    uint8_t payload[64];
+    size_t length = append_card(payload, 0, 7, "D", "Q", "A");
+    length = append_card(payload, length, 8, "D", "Q2", "A2");
+    assert(import_bytes(&store, payload, 2, (uint32_t)length));
+    assert(pa_store_grade(&store, 1, PA_EASY));
+    assert(pa_store_advance(&store, 3));
+    assert(pa_store_grade(&store, 0, PA_AGAIN));
+
+    pa_export_info info;
+    assert(pa_store_export_begin(&store, &info));
+    assert(info.card_count == 2 && info.revlog_count == 2 && info.dropped == 0);
+    assert(info.length == PA_EXPORT_HEADER + 2u * PA_EXPORT_SCHED + 2u * PA_REVLOG_RECORD);
+    uint8_t image[128];
+    assert(info.length <= sizeof(image));
+    uint32_t filled = 0;
+    while (filled < info.length) {
+        uint32_t got = 0;
+        assert(pa_store_export_read(&store, filled, image + filled, 10, &got) && got > 0);
+        filled += got;
+    }
+    assert(filled == info.length);
+    assert(pa_crc32(image, info.length) == info.crc);
+    assert(memcmp(image, "PREV", 4) == 0);
+    const uint8_t *rev = image + PA_EXPORT_HEADER + 2u * PA_EXPORT_SCHED;
+    assert(rev[0] == 1 && rev[1] == 0 && rev[2] == PA_EASY);
+    assert(rev[8] == 0 && rev[9] == 0 && rev[10] == PA_AGAIN);
+    pa_export_info status;
+    assert(pa_store_export_status(&store, &status) && status.served == info.length);
+    assert(!pa_store_export_read(&store, info.length, image, 1, &filled));
+
+    pa_store remounted;
+    pa_store_init(&remounted, &cards, &sched);
+    assert(pa_store_mount(&remounted) == PA_STORE_READY);
+    pa_export_info again;
+    assert(pa_store_export_begin(&remounted, &again));
+    assert(again.revlog_count == 2 && again.crc == info.crc && again.epoch == info.epoch);
+    uint8_t prefix[16];
+    uint32_t got = 0;
+    assert(pa_store_export_read(&remounted, 0, prefix, sizeof(prefix), &got) && got == sizeof(prefix));
+    assert(pa_store_export_status(&remounted, &status) && status.served == sizeof(prefix));
+    assert(pa_store_grade(&remounted, 0, PA_HARD));
+    assert(!pa_store_export_read(&remounted, 0, prefix, sizeof(prefix), &got));
+
+    assert(import_bytes(&remounted, payload, 2, (uint32_t)length));
+    assert(pa_store_export_begin(&remounted, &again));
+    assert(again.revlog_count == 0 && again.dropped == 0 && again.epoch != info.epoch);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    printf("store: review log export PASS; pa_store %zu bytes; revlog max %u\n", sizeof(pa_store),
+           PA_REVLOG_MAX);
+}
+
 int main(void)
 {
     test_pack_vector();
@@ -326,5 +387,6 @@ int main(void)
     test_resume_and_migration();
     test_power_loss_and_publish();
     test_ten_thousand_and_heap();
+    test_revlog_export_roundtrip();
     return 0;
 }

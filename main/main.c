@@ -222,6 +222,14 @@ static void abort_import(void) {
 
 static void reply_error(const char *code) { printf("ERR %s\n", code); fflush(stdout); }
 
+static void reply_export(const char *kind, const pa_export_info *info) {
+    printf("OK %s cards=%u revlog=%" PRIu32 " crc=%" PRIu32 " length=%" PRIu32
+           " epoch=%" PRIu32 " dropped=%" PRIu32 " now=%" PRIu32 " offset=%" PRIu32 "\n",
+           kind, info->card_count, info->revlog_count, info->crc, info->length, info->epoch,
+           info->dropped, info->now, info->served);
+    fflush(stdout);
+}
+
 static void handle_line(char *line) {
     pa_protocol_command command;
     if (!pa_protocol_parse(line, strlen(line), &command)) { reply_error("COMMAND"); return; }
@@ -313,6 +321,37 @@ static void handle_line(char *line) {
         printf("OK DAY\n");
         fflush(stdout);
         render();
+        return;
+    }
+    case PA_PROTOCOL_EXPORT: {
+        pa_export_info info;
+        if (store.import_active || !pa_store_export_begin(&store, &info)) {
+            reply_error(store.import_active ? "TRANSACTION" : "REVLOG");
+            return;
+        }
+        reply_export("EXPORT", &info);
+        return;
+    }
+    case PA_PROTOCOL_XCHUNK: {
+        uint8_t chunk[PA_PROTOCOL_CHUNK_MAX];
+        uint32_t got = 0;
+        char hex[PA_PROTOCOL_CHUNK_MAX * 2u + 1u];
+        if (!pa_store_export_read(&store, command.value, chunk, sizeof(chunk), &got)) {
+            reply_error("RANGE");
+            return;
+        }
+        pa_protocol_write_hex(chunk, got, hex);
+        printf("OK XCHUNK %" PRIu32 " %s\n", command.value + got, hex);
+        fflush(stdout);
+        return;
+    }
+    case PA_PROTOCOL_XRESUME: {
+        pa_export_info info;
+        if (!pa_store_export_status(&store, &info)) {
+            reply_error("TRANSACTION");
+            return;
+        }
+        reply_export("XRESUME", &info);
         return;
     }
     case PA_PROTOCOL_CARD:

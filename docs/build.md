@@ -31,7 +31,7 @@ USB line parser run without ESP-IDF:
     cmake --build build/host --parallel
     ctest --test-dir build/host --output-on-failure
     python3 -m pip install -r requirements-dev.txt
-    python3 -m pytest -q tests/test_deck.py
+    python3 -m pytest -q tests/test_deck.py tests/test_anki_sync.py tests/test_simulator.py
 
 GitHub Actions runs these host tests and a separate ESP-IDF container build.
 The firmware job publishes app.bin, bootloader.bin, partition-table.bin,

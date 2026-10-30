@@ -41,6 +41,10 @@ int main(void)
     assert(strcmp(command.back, "hi\nthere") == 0);
     assert(pa_protocol_parse("COMMIT", 6, &command) && command.kind == PA_PROTOCOL_COMMIT);
     assert(pa_protocol_parse("ABORT", 5, &command) && command.kind == PA_PROTOCOL_ABORT);
+    assert(pa_protocol_parse("EXPORT\n", 7, &command) && command.kind == PA_PROTOCOL_EXPORT);
+    assert(pa_protocol_parse("XRESUME", 7, &command) && command.kind == PA_PROTOCOL_XRESUME);
+    assert(pa_protocol_parse("XCHUNK 12", 9, &command));
+    assert(command.kind == PA_PROTOCOL_XCHUNK && command.value == 12);
 
     REJECTS("BEGIN 0");
     REJECTS("BEGIN 64");
@@ -65,6 +69,8 @@ int main(void)
     REJECTS("CARD 1 e2 82 61");
     REJECTS("CARD 1 c0af 61 62");
     REJECTS("CARD 1 eda080 61 62");
+    REJECTS("XCHUNK");
+    REJECTS("EXPORT now");
     REJECTS("UNKNOWN");
     rejects_unchanged(NULL, 0);
 
