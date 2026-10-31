@@ -68,6 +68,7 @@ static uint16_t deck_index, question_page, answer_page;
 static bool confirming_day, grade_save_failed;
 static const char *last_error = "";
 static lv_obj_t *title_label, *body_label, *footer_label;
+static lv_obj_t *header_rule, *footer_panel, *grade_chip[4], *grade_chip_label[4];
 
 static bool part_read(void *ctx, uint32_t offset, void *dst, uint32_t length)
 {
@@ -245,8 +246,11 @@ static bool open_tail_storage(void)
 static uint16_t glyph_width(uint32_t cp, void *user) {
     (void)user;
     lv_font_glyph_dsc_t glyph;
-    return lv_font_get_glyph_dsc(&pa_font_16, &glyph, cp, 0) && !glyph.is_placeholder
-               ? glyph.adv_w : 0;
+    if (!lv_font_get_glyph_dsc(&pa_font_16, &glyph, cp, 0) || glyph.is_placeholder) {
+        return 0;
+    }
+    /* LVGL stores advance width in 1/16 px; layout width is in pixels. */
+    return (uint16_t)((glyph.adv_w + 15u) >> 4);
 }
 
 static bool text_fits(const char *text) {
@@ -286,25 +290,52 @@ static uint32_t grade_color(pa_rating rating) {
     return rating <= PA_EASY ? colors[rating] : colors[PA_GOOD];
 }
 
-static void format_grades(char *dst, size_t cap, pa_rating selected) {
-    static const char *names[] = {"Again", "Hard", "Good", "Easy"};
-    size_t used = 0;
-    dst[0] = '\0';
-    for (int i = 0; i < 4; ++i) {
-        int wrote = snprintf(dst + used, cap - used, "%s%s%s%s", used ? " " : "",
-                             (pa_rating)i == selected ? "[" : "", names[i],
-                             (pa_rating)i == selected ? "]" : "");
-        if (wrote < 0 || (size_t)wrote >= cap - used) {
-            dst[cap - 1] = '\0';
-            return;
-        }
-        used += (size_t)wrote;
-    }
-}
-
 static bool load_current_card(void) {
     return pa_store_read(&store, session.current, card_deck, sizeof(card_deck), card_front,
                          sizeof(card_front), card_back, sizeof(card_back));
+}
+
+static bool study_card_ui(void) {
+    return ui == UI_QUESTION || ui == UI_ANSWER || ui == UI_RATING;
+}
+
+static void set_obj_hidden(lv_obj_t *obj, bool hidden) {
+    if (!obj) return;
+    if (hidden) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void sync_study_chrome(void) {
+    const bool card = study_card_ui();
+    set_obj_hidden(header_rule, !card);
+    set_obj_hidden(footer_panel, !card);
+    for (int i = 0; i < 4; ++i) {
+        set_obj_hidden(grade_chip[i], !card || ui != UI_RATING || grade_save_failed);
+    }
+    set_obj_hidden(footer_label, card && ui == UI_RATING && !grade_save_failed);
+    if (card) {
+        for (int i = 0; i < 4; ++i) {
+            const bool selected = (pa_rating)i == selected_rating;
+            lv_obj_set_style_bg_color(grade_chip[i], lv_color_hex(selected ? grade_color((pa_rating)i)
+                                                                           : 0x1E2630),
+                                      0);
+            lv_obj_set_style_border_color(grade_chip[i],
+                                          lv_color_hex(selected ? grade_color((pa_rating)i)
+                                                                : 0x3A4552),
+                                          0);
+            lv_obj_set_style_border_width(grade_chip[i], selected ? 2 : 1, 0);
+            lv_obj_set_style_text_color(grade_chip_label[i],
+                                        lv_color_hex(selected ? 0xFFFFFF : 0xC8D0DA), 0);
+        }
+    }
+    lv_text_align_t body_align = card ? LV_TEXT_ALIGN_CENTER : LV_TEXT_ALIGN_LEFT;
+    lv_obj_set_style_text_align(body_label, body_align, 0);
+    if (footer_panel) {
+        lv_obj_set_style_bg_opa(footer_panel, card ? LV_OPA_70 : LV_OPA_TRANSP, 0);
+    }
 }
 
 static void render(void) {
@@ -365,8 +396,8 @@ static void render(void) {
             snprintf(footer, sizeof(footer), "保存失败  OK 重试");
         } else {
             body_color = 0xE7F0FA;
-            footer_color = grade_color(selected_rating);
-            format_grades(footer, sizeof(footer), selected_rating);
+            footer_color = 0xC8D0DA;
+            snprintf(footer, sizeof(footer), "上下选择  OK 确认");
         }
     } else if (ui == UI_EMPTY) {
         snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n可推进学习日。",
@@ -386,9 +417,13 @@ static void render(void) {
                  (!storage_ready ? "卡片空间不可用" : ""));
     }
 draw_labels:
+    sync_study_chrome();
     lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
     lv_label_set_long_mode(body_label, body_wrap ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_CLIP);
     lv_label_set_long_mode(footer_label, LV_LABEL_LONG_CLIP);
+    if (study_card_ui()) {
+        title_color = 0x7A8694;
+    }
     lv_obj_set_style_text_color(title_label, lv_color_hex(title_color), 0);
     lv_obj_set_style_text_color(body_label, lv_color_hex(body_color), 0);
     lv_obj_set_style_text_color(footer_label, lv_color_hex(footer_color), 0);
@@ -731,33 +766,71 @@ void app_main(void) {
         return;
     }
     {
+        static const char *grade_names[] = {"Again", "Hard", "Good", "Easy"};
+        const int chip_w = (PA_STUDY_TEXT_WIDTH - 4) / 2;
+        const int chip_h = PA_STUDY_GRADE_ROW_H;
         lv_obj_t *screen = lv_screen_active();
         lv_obj_set_style_bg_color(screen, lv_color_hex(0x12161C), 0);
         lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
         title_label = lv_label_create(screen);
-        lv_obj_set_pos(title_label, 18, 30);
-        lv_obj_set_size(title_label, PA_STUDY_TEXT_WIDTH, 31);
+        lv_obj_set_pos(title_label, PA_STUDY_MARGIN_X, PA_STUDY_TITLE_Y);
+        lv_obj_set_size(title_label, PA_STUDY_TEXT_WIDTH, PA_STUDY_TITLE_H);
         lv_obj_set_style_pad_all(title_label, 0, 0);
         lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_line_space(title_label, 0, 0);
         lv_obj_set_style_text_font(title_label, &pa_font_16, 0);
         lv_obj_set_style_text_color(title_label, lv_color_hex(0x8B95A1), 0);
+        header_rule = lv_obj_create(screen);
+        lv_obj_remove_style_all(header_rule);
+        lv_obj_set_pos(header_rule, PA_STUDY_MARGIN_X, PA_STUDY_TITLE_Y + PA_STUDY_TITLE_H + 2);
+        lv_obj_set_size(header_rule, PA_STUDY_TEXT_WIDTH, 1);
+        lv_obj_set_style_bg_color(header_rule, lv_color_hex(0x2A3340), 0);
+        lv_obj_set_style_bg_opa(header_rule, LV_OPA_COVER, 0);
+        lv_obj_add_flag(header_rule, LV_OBJ_FLAG_HIDDEN);
         body_label = lv_label_create(screen);
-        lv_obj_set_pos(body_label, 18, 64);
-        lv_obj_set_size(body_label, PA_STUDY_TEXT_WIDTH, PA_STUDY_TEXT_LINES * 31);
+        lv_obj_set_pos(body_label, PA_STUDY_MARGIN_X, PA_STUDY_BODY_Y);
+        lv_obj_set_size(body_label, PA_STUDY_TEXT_WIDTH, PA_STUDY_BODY_H);
         lv_obj_set_style_pad_all(body_label, 0, 0);
         lv_label_set_long_mode(body_label, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_font(body_label, &pa_font_16, 0);
-        lv_obj_set_style_text_line_space(body_label, 0, 0);
+        lv_obj_set_style_text_line_space(body_label, PA_STUDY_BODY_LINE_SP, 0);
         lv_obj_set_style_text_color(body_label, lv_color_hex(0xF4F1EA), 0);
+        footer_panel = lv_obj_create(screen);
+        lv_obj_remove_style_all(footer_panel);
+        lv_obj_set_pos(footer_panel, PA_STUDY_MARGIN_X, PA_STUDY_FOOTER_Y);
+        lv_obj_set_size(footer_panel, PA_STUDY_TEXT_WIDTH, PA_STUDY_FOOTER_H);
+        lv_obj_set_style_bg_color(footer_panel, lv_color_hex(0x0E1218), 0);
+        lv_obj_set_style_bg_opa(footer_panel, LV_OPA_70, 0);
+        lv_obj_set_style_radius(footer_panel, 8, 0);
+        lv_obj_set_style_pad_all(footer_panel, 4, 0);
+        lv_obj_add_flag(footer_panel, LV_OBJ_FLAG_HIDDEN);
         footer_label = lv_label_create(screen);
-        lv_obj_set_pos(footer_label, 18, 64 + PA_STUDY_TEXT_LINES * 31 + 3);
-        lv_obj_set_size(footer_label, PA_STUDY_TEXT_WIDTH, 31);
+        lv_obj_set_pos(footer_label, PA_STUDY_MARGIN_X, PA_STUDY_FOOTER_Y);
+        lv_obj_set_size(footer_label, PA_STUDY_TEXT_WIDTH, PA_STUDY_FOOTER_H);
         lv_obj_set_style_pad_all(footer_label, 0, 0);
         lv_label_set_long_mode(footer_label, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_line_space(footer_label, 0, 0);
         lv_obj_set_style_text_font(footer_label, &pa_font_16, 0);
         lv_obj_set_style_text_color(footer_label, lv_color_hex(0x9AA3AD), 0);
+        lv_obj_set_style_text_align(footer_label, LV_TEXT_ALIGN_CENTER, 0);
+        for (int i = 0; i < 4; ++i) {
+            const int col = i % 2;
+            const int row = i / 2;
+            grade_chip[i] = lv_obj_create(footer_panel);
+            lv_obj_remove_style_all(grade_chip[i]);
+            lv_obj_set_pos(grade_chip[i], 4 + col * (chip_w + 4), 4 + row * (chip_h + 4));
+            lv_obj_set_size(grade_chip[i], chip_w, chip_h);
+            lv_obj_set_style_radius(grade_chip[i], 6, 0);
+            lv_obj_set_style_bg_opa(grade_chip[i], LV_OPA_COVER, 0);
+            lv_obj_set_style_border_opa(grade_chip[i], LV_OPA_COVER, 0);
+            lv_obj_add_flag(grade_chip[i], LV_OBJ_FLAG_HIDDEN);
+            grade_chip_label[i] = lv_label_create(grade_chip[i]);
+            lv_obj_set_width(grade_chip_label[i], chip_w);
+            lv_obj_set_style_text_align(grade_chip_label[i], LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_font(grade_chip_label[i], &pa_font_16, 0);
+            lv_label_set_text(grade_chip_label[i], grade_names[i]);
+            lv_obj_center(grade_chip_label[i]);
+        }
         bsp_lvgl_unlock();
     }
     bsp_display_backlight(70);
