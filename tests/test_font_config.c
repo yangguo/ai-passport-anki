@@ -1,4 +1,4 @@
-/* The checked-in UI font is produced by lv_font_conv without --no-compress.
+/* The checked-in UI fonts are produced by lv_font_conv without --no-compress.
  * LVGL 9.5 treats bitmap_format 1/2 as RLE and returns no glyph bitmap unless
  * LV_USE_FONT_COMPRESSED is on. The deck screen then stays the dark background. */
 #include <stdio.h>
@@ -36,13 +36,8 @@ static char *read_file(const char *path)
     return data;
 }
 
-int main(void)
+static int check_font(const char *font_path, const char *config_path, const char *label)
 {
-    char font_path[512];
-    char config_path[512];
-    snprintf(font_path, sizeof(font_path), "%s/assets/fonts/pa_font_16.c", PA_SOURCE_DIR);
-    snprintf(config_path, sizeof(config_path), "%s/sdkconfig.defaults", PA_SOURCE_DIR);
-
     char *font = read_file(font_path);
     char *config = read_file(config_path);
     if (!font || !config) {
@@ -53,7 +48,7 @@ int main(void)
 
     const char *format_field = strstr(font, ".bitmap_format = ");
     if (!format_field) {
-        fprintf(stderr, "pa_font_16.c has no bitmap_format field\n");
+        fprintf(stderr, "%s has no bitmap_format field\n", label);
         free(font);
         free(config);
         return 1;
@@ -63,9 +58,9 @@ int main(void)
     int decompressor_enabled = strstr(config, "CONFIG_LV_USE_FONT_COMPRESSED=y") != NULL;
     if (compressed && !decompressor_enabled) {
         fprintf(stderr,
-                "pa_font_16 bitmap_format=%d needs CONFIG_LV_USE_FONT_COMPRESSED=y; "
+                "%s bitmap_format=%d needs CONFIG_LV_USE_FONT_COMPRESSED=y; "
                 "without it LVGL draws no glyphs\n",
-                format);
+                label, format);
         free(font);
         free(config);
         return 1;
@@ -73,5 +68,22 @@ int main(void)
 
     free(font);
     free(config);
+    return 0;
+}
+
+int main(void)
+{
+    char font_path[512];
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/sdkconfig.defaults", PA_SOURCE_DIR);
+
+    snprintf(font_path, sizeof(font_path), "%s/assets/fonts/pa_font_16.c", PA_SOURCE_DIR);
+    if (check_font(font_path, config_path, "pa_font_16.c") != 0) {
+        return 1;
+    }
+    snprintf(font_path, sizeof(font_path), "%s/assets/fonts/pa_font_20.c", PA_SOURCE_DIR);
+    if (check_font(font_path, config_path, "pa_font_20.c") != 0) {
+        return 1;
+    }
     return 0;
 }
