@@ -3,6 +3,11 @@ CONFIG_IDF_TARGET="esp32c3"
 
 # --- Flash ---
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+# Card bytes live in the running factory partition, after the verified image.
+# The default ABORTS policy calls abort() on every tail erase, so BEGIN never
+# replies and ABORT panics. Keep the check, but return an error instead of
+# panicking if a write is not explicitly unprotected for one tail span.
+CONFIG_SPI_FLASH_DANGEROUS_WRITE_FAILS=y
 CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

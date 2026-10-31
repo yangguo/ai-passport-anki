@@ -1139,9 +1139,10 @@ bool pa_store_import_resume(const pa_store *store, uint32_t *offset, uint32_t *c
 
 void pa_store_import_abort(pa_store *store)
 {
-    if (store != NULL) {
-        (void)clear_progress(store);
+    if (store == NULL || (!store->import_active && !store->import_pending)) {
+        return;
     }
+    (void)clear_progress(store);
 }
 
 static bool read_payload(pa_store *store, uint32_t offset, uint8_t *dst, uint32_t length, uint32_t *crc)
