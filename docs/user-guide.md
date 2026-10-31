@@ -4,13 +4,18 @@
 
 电脑准备 UTF-8 TSV，第一行为四列：`id`、`deck`、`front`、`back`。每张卡 ID 唯一非零，多个相同 deck 名的卡归为同一牌组。最多 12,000 张、最多 64 个牌组、牌组名最多 47 UTF-8 字节、每面最多 511 UTF-8 字节。中文通常每字 3 字节，假名也是 3 字节。标准 TSV 引用字段可以包含换行。超出长度会报错，不会截断。
 
-从 Anki 导出文字时，优先采用 UTF-8 文本。旧式 Basic APKG 可转换。字段里带 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组（例如 [anki-jlpt-decks](https://github.com/5mdld/anki-jlpt-decks) 的 `eggrolls-JLPT10k-v3.5.apkg`）会取词条、假名、声调、词性和简体释义，并带上第一条例句；音频和图片丢弃，`汉字[假名]` 写成 `汉字（假名）`。Cloze、复杂模板、`collection.anki21b` 不转换。`--map out.json` 把设备上的 u32 ID 对应到 Anki 卡片 ID（JSON 里用字符串），这个文件是本地数据，不要提交进仓库。设备不上网，也不保存 Anki 的 64 位 ID。
+从 Anki 导出文字时，优先采用 UTF-8 文本。旧式 Basic APKG 可转换。字段里带 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组（例如 [anki-jlpt-decks](https://github.com/5mdld/anki-jlpt-decks) 的 `eggrolls-JLPT10k-v3.5.apkg`）会取词条、假名、声调、词性和简体释义，并带上第一条例句；音频和图片丢弃，`汉字[假名]` 写成 `汉字（假名）`。Cloze、复杂模板不转换；`collection.anki21b`（zstd 压缩）已支持，多成员包优先用它。`--map out.json` 把设备上的 u32 ID 对应到 Anki 卡片 ID（JSON 里用字符串），这个文件是本地数据，不要提交进仓库。设备不上网，也不保存 Anki 的 64 位 ID。嵌套子牌组取末级名（如 `1-高频`），同名末级会合并。
 
 ```sh
 python3 tools/deck.py inspect decks/demo.tsv
 python3 tools/deck.py commands decks/demo.tsv --output demo.commands
 python3 -m pip install -r requirements.txt
 python3 tools/deck.py upload decks/demo.tsv --port /dev/cu.usbmodem1101
+```
+
+```sh
+python3 tools/deck.py inspect n3.apkg
+python3 tools/deck.py upload n3.apkg --port /dev/cu.usbmodem1101
 ```
 
 端口需使用自己电脑上实际设备路径。导入会整体替换设备卡片并重置复习历史，只有设备返回 `OK COMMIT` 才算成功。数据按最多 480 字节一块上传。中断后再次 upload 会从设备已经写好的位置继续；对不上时工具才 ABORT。COMMIT 可能要比单块更久，默认等待 120 秒。
@@ -30,7 +35,7 @@ python3 tools/deck.py upload decks/local.tsv --port /dev/cu.usbmodem1101
 
 `--upload` 可以接在 `anki-pull` 后面，仍然要给 `--port`。映射 JSON 把设备上的 u32 id 对应到 Anki 卡片 id（字符串）。再次 pull 同一份映射时会尽量复用这些设备 id。这个文件和旁边的回写收据都是本地数据，不要提交进仓库。
 
-AnkiConnect 连不上时，可以只读集合文件。工具先把 `collection.anki2` 或 `collection.anki21`（以及旁边的 `-wal`、`-shm`）复制到临时目录，再以只读方式打开副本，不写原文件。`collection.anki21b` 会拒绝。Anki 进程还在时会警告：副本可能看不到尚未写盘的复习。更稳妥的做法是先退出 Anki。
+AnkiConnect 连不上时，可以只读集合文件。工具把 `collection.anki2`、`collection.anki21` 复制到临时目录（含旁边的 `-wal`、`-shm`）；压缩的 `collection.anki21b` 先解压为临时 SQLite 再只读打开，不复制 `-wal`/`-shm`。副本都不写回原文件。直接传 `.apkg` 文件也能导入（含 `anki21b` 的新包，如 `n3.apkg`）。Anki 进程还在时会警告：副本可能看不到尚未写盘的复习。更稳妥的做法是先退出 Anki。
 
 ```sh
 python3 tools/deck.py anki-decks --collection ~/.local/share/Anki2/User\ 1/collection.anki2

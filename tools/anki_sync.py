@@ -1,8 +1,8 @@
 """Host-side Anki pull and review write-back.
 
 The device stays offline. This module talks to AnkiConnect on localhost, or reads a
-copy of collection.anki2 / collection.anki21. It never logs into AnkiWeb and never
-writes device-computed intervals into Anki.
+copy of collection.anki2 / collection.anki21 / collection.anki21b. It never logs into
+AnkiWeb and never writes device-computed intervals into Anki.
 """
 from __future__ import annotations
 
@@ -83,10 +83,9 @@ def invoke_anki(deck, url: str, action: str, params: dict | None = None, api_key
 
 
 def _open_collection_copy(deck, path: Path):
-    if path.suffix == ".anki21b" or path.name.endswith(".anki21b"):
-        raise deck.DeckError("collection.anki21b is unsupported; use collection.anki2 or collection.anki21")
-    if path.suffix not in {".anki2", ".anki21"}:
-        raise deck.DeckError("collection must be collection.anki2 or collection.anki21")
+    is_21b = path.suffix == ".anki21b"
+    if not is_21b and path.suffix not in {".anki2", ".anki21"}:
+        raise deck.DeckError("collection must be collection.anki2, collection.anki21, or collection.anki21b")
     if not path.is_file():
         raise deck.DeckError(f"collection not found: {path}")
     if anki_desktop_running():
@@ -98,14 +97,25 @@ def _open_collection_copy(deck, path: Path):
     temp = tempfile.TemporaryDirectory(prefix="passport-anki-col-")
     dest = Path(temp.name) / path.name
     try:
-        shutil.copy2(path, dest)
-        for suffix in ("-wal", "-shm"):
-            extra = Path(str(path) + suffix)
-            if extra.is_file():
-                shutil.copy2(extra, Path(temp.name) / extra.name)
+        if is_21b:
+            if path.stat().st_size > deck.APKG_DB_MAX_BYTES:
+                raise deck.DeckError(
+                    f"collection exceeds {deck.APKG_DB_MAX_BYTES} byte conversion limit"
+                )
+            sqlite_dest = dest.with_suffix(".sqlite")
+            sqlite_dest.write_bytes(deck._decompress_anki21b(path.read_bytes(), path.name))
+            dest = sqlite_dest
+        else:
+            shutil.copy2(path, dest)
+            for suffix in ("-wal", "-shm"):
+                extra = Path(str(path) + suffix)
+                if extra.is_file():
+                    shutil.copy2(extra, Path(temp.name) / extra.name)
         connection = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error, deck.DeckError) as exc:
         temp.cleanup()
+        if isinstance(exc, deck.DeckError):
+            raise
         raise deck.DeckError(f"cannot open a read-only copy of the collection: {exc}") from exc
     connection.row_factory = sqlite3.Row
     return connection, temp
@@ -115,7 +125,7 @@ def _deck_names_from_connection(deck, connection: sqlite3.Connection) -> list[st
     tables = deck._table_names(connection)
     if {"notetypes", "fields", "decks"} <= tables:
         try:
-            return [str(row["name"]) for row in connection.execute("SELECT name FROM decks ORDER BY name")]
+            return sorted({deck._leaf_deck_name(str(row["name"])) for row in connection.execute("SELECT name FROM decks ORDER BY name")})
         except sqlite3.Error as exc:
             raise deck.DeckError(f"collection schema cannot list decks: {exc}") from exc
     if "col" not in tables:
@@ -130,7 +140,7 @@ def _deck_names_from_connection(deck, connection: sqlite3.Connection) -> list[st
         payload = json.loads(row["decks"])
     except (TypeError, json.JSONDecodeError) as exc:
         raise deck.DeckError(f"collection deck list is not JSON: {exc}") from exc
-    return sorted(str(value.get("name", "")) for value in payload.values() if isinstance(value, dict))
+    return sorted({deck._leaf_deck_name(str(value.get("name", ""))) for value in payload.values() if isinstance(value, dict)})
 
 
 def list_decks(deck, *, url: str | None, collection: Path | None, api_key: str | None) -> list[str]:
@@ -156,7 +166,7 @@ def list_decks(deck, *, url: str | None, collection: Path | None, api_key: str |
             temp.cleanup()
     if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
         raise deck.DeckError("AnkiConnect deckNames did not return a list of names")
-    return names
+    return sorted({deck._leaf_deck_name(str(name)) for name in names})
 
 
 def _load_map(path: Path | None) -> dict | None:
@@ -217,7 +227,8 @@ def _card_from_info(deck, info: dict):
         values = [str(meta["value"]) for _name, meta in ordered]
         kind = 1 if "cloze" in model_name.lower() else 0
         model = {"name": model_name, "type": kind, "flds": [{"name": name} for name in names]}
-        return deck.card_from_note(model, values, str(info["deckName"]), int(info["note"]), int(info["cardId"]), 1)
+        leaf = deck._leaf_deck_name(str(info["deckName"]))
+        return deck.card_from_note(model, values, leaf, int(info["note"]), int(info["cardId"]), 1)
     except (KeyError, TypeError, ValueError) as exc:
         raise deck.DeckError(f"AnkiConnect cardsInfo is missing fields: {exc}") from exc
 
@@ -226,28 +237,33 @@ def _pull_connect(deck, names: list[str], url: str, api_key: str | None, existin
     known = invoke_anki(deck, url, "deckNames", api_key=api_key)
     if not isinstance(known, list):
         raise deck.DeckError("AnkiConnect deckNames did not return a list of names")
-    missing = [name for name in names if name not in known]
+    leaf_to_full: dict[str, list[str]] = {}
+    for full in known:
+        leaf_to_full.setdefault(deck._leaf_deck_name(str(full)), []).append(str(full))
+    wanted = {deck._leaf_deck_name(str(name)) for name in names}
+    missing = [name for name in names if deck._leaf_deck_name(str(name)) not in leaf_to_full]
     if missing:
         raise deck.DeckError(f"deck {missing[0]!r} is not in the open Anki collection")
     found = []
     seen: set[int] = set()
-    for name in names:
-        card_ids = invoke_anki(deck, url, "findCards", {"query": f'deck:"{_escape_deck(name)}"'}, api_key)
-        if not isinstance(card_ids, list):
-            raise deck.DeckError(f"AnkiConnect findCards failed for {name}")
-        for start in range(0, len(card_ids), 100):
-            batch = card_ids[start:start + 100]
-            infos = invoke_anki(deck, url, "cardsInfo", {"cards": batch}, api_key)
-            if not isinstance(infos, list):
-                raise deck.DeckError("AnkiConnect cardsInfo did not return a list")
-            for info in infos:
-                if str(info.get("deckName")) != name:
-                    continue
-                card_id = int(info["cardId"])
-                if card_id in seen:
-                    continue
-                seen.add(card_id)
-                found.append(_card_from_info(deck, info))
+    for leaf in sorted(wanted):
+        for full in leaf_to_full[leaf]:
+            card_ids = invoke_anki(deck, url, "findCards", {"query": f'deck:"{_escape_deck(full)}"'}, api_key)
+            if not isinstance(card_ids, list):
+                raise deck.DeckError(f"AnkiConnect findCards failed for {full}")
+            for start in range(0, len(card_ids), 100):
+                batch = card_ids[start:start + 100]
+                infos = invoke_anki(deck, url, "cardsInfo", {"cards": batch}, api_key)
+                if not isinstance(infos, list):
+                    raise deck.DeckError("AnkiConnect cardsInfo did not return a list")
+                for info in infos:
+                    if deck._leaf_deck_name(str(info.get("deckName"))) not in wanted:
+                        continue
+                    card_id = int(info["cardId"])
+                    if card_id in seen:
+                        continue
+                    seen.add(card_id)
+                    found.append(_card_from_info(deck, info))
     if not found:
         raise deck.DeckError("deck has no cards")
     return _reassign(deck, found, existing)
@@ -257,10 +273,11 @@ def _pull_collection(deck, names: list[str], path: Path, existing: dict | None) 
     connection, temp = _open_collection_copy(deck, path)
     try:
         known = set(_deck_names_from_connection(deck, connection))
-        missing = [name for name in names if name not in known]
+        wanted = {deck._leaf_deck_name(str(name)) for name in names}
+        missing = [name for name in names if deck._leaf_deck_name(str(name)) not in known]
         if missing:
             raise deck.DeckError(f"deck {missing[0]!r} is not in the collection")
-        return _reassign(deck, deck.read_sqlite_collection(connection, set(names)), existing)
+        return _reassign(deck, deck.read_sqlite_collection(connection, wanted), existing)
     finally:
         connection.close()
         temp.cleanup()

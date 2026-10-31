@@ -16,7 +16,7 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 | 中文显示、长文本分页 | 实现 | 覆盖中文基本区及规定字符范围；不支持 emoji/富文本 |
 | 电脑 USB 导入 | 实现 | TSV；旧式 Basic APKG；JLPT 字段牌组。分块上传，CRC 校验后整组替换并重置复习记录 |
 | 本机 Anki 取牌组与回写 | 实现 | 设备离线。电脑用 AnkiConnect 或只读集合副本取出 Basic/JLPT 文本，经现有 v2 USB 导入。复习档位经 `answerCards` 交回本机 Anki，由 Anki 计算间隔。用户再在官方客户端同步 AnkiWeb |
-| 完整 APKG/Anki 集合兼容 | 不包含 | 不运行 Anki 模板引擎；不提取媒体；anki21b 拒绝。Anki 的 i64 卡片 ID 只留在电脑映射里 |
+| 完整 APKG/Anki 集合兼容 | 不包含 | 不运行 Anki 模板引擎；不提取媒体；anki21b（zstd）读取，多成员取 anki21b > anki21 > anki2。Anki 的 i64 卡片 ID 只留在电脑映射里 |
 | 图片、音频、TTS、手写、数学公式 | 不包含 | 后续资源包设计 |
 | 设备登录 AnkiWeb、Wi-Fi、FSRS | 不包含 | 设备不保存密码或 hkey，不实现同步协议。间隔算法仍是本文第 7 节，不是 FSRS |
 | 自动 RTC/关机计时 | 不包含 | 离线学习时钟，用户明确推进日期 |
@@ -200,7 +200,7 @@ PAK1（magic `PAK1`，version 1，末尾 CRC32）仍是迁移输入。解码失�
 
 规范 TSV：UTF-8（允许 BOM），标题 `id\tdeck\tfront\tback`。使用 Python csv delimiter=tab，支持引用字段内的真实换行；ID 十进制1..UINT32_MAX。可支持 Anki文本导出（前/后两列，#分隔符/HTML注释），规范化由工具完成。
 
-旧式 APKG：只读 zip 内的 SQLite。同时存在 `collection.anki21` 和较小的 `collection.anki2` 时用 anki21（JLPT 包里的 anki2 是空壳）。`collection.anki21b` 直接拒绝。不解压媒体，不执行 SQL 扩展或模板脚本。Basic 模型取前两个文本字段。字段名含 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组按 JLPT 规则转换：正面是词条，若注音不同再加一行；背面依次放声调、词性、简体释义、补充、第一条例句注音和简体例句释义。先去掉 `[sound:...]` 和图片标签，HTML 转成纯文本并保留 `<br>` 换行，再把 `汉字[假名]` 收成 `汉字（假名）`。背面超过 511 字节时先丢掉补充，再丢掉例句释义，仍然超出就报错，不截断。Cloze 和其它模型拒绝。一台笔记多张卡拒绝。
+旧式 APKG：只读 zip 内的 SQLite。同时存在 `collection.anki21` 和较小的 `collection.anki2` 时用 anki21（JLPT 包里的 anki2 是空壳）。`collection.anki21b` 解压后同读（压缩不超 16 MiB、解压后上限 64 MiB）；多成员按 anki21b > anki21 > anki2 取。不解压媒体，不执行 SQL 扩展或模板脚本。Basic 模型取前两个文本字段。字段名含 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组按 JLPT 规则转换：正面是词条，若注音不同再加一行；背面依次放声调、词性、简体释义、补充、第一条例句注音和简体例句释义。先去掉 `[sound:...]` 和图片标签，HTML 转成纯文本并保留 `<br>` 换行，再把 `汉字[假名]` 收成 `汉字（假名）`。背面超过 511 字节时先丢掉补充，再丢掉例句释义，仍然超出就报错，不截断。Cloze 和其它模型拒绝。一台笔记多张卡拒绝。
 
 行协议 ASCII，正文 hex编码UTF-8；最大行1200字节，串口输入超过上限必须丢弃整个行并报错。reader遇到断线/半行不能重复上一命令。
 

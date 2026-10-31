@@ -27,6 +27,7 @@ MAX_CHUNK_BYTES = 480
 UINT32_MAX = 0xFFFFFFFF
 PROTOCOL_VERSION = 2
 APKG_DB_MAX_BYTES = 16 * 1024 * 1024
+APKG_DECOMPRESSED_MAX_BYTES = 64 * 1024 * 1024
 FONT_MANIFEST = Path(__file__).resolve().parents[1] / "assets/fonts/pa_font_16.manifest.json"
 
 
@@ -213,6 +214,38 @@ def _read_tsv(path: Path) -> list[Card]:
     return _finish(cards)
 
 
+def _decompress_anki21b(data: bytes, member: str) -> bytes:
+    try:
+        import zstandard
+    except ImportError as exc:
+        raise DeckError(
+            f"{member} is zstd-compressed; install it with: pip install -r requirements.txt"
+        ) from exc
+    try:
+        reader = zstandard.ZstdDecompressor().stream_reader(data)
+        try:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                piece = reader.read(min(1 << 20, APKG_DECOMPRESSED_MAX_BYTES + 1 - total))
+                if not piece:
+                    break
+                chunks.append(piece)
+                total += len(piece)
+                if total > APKG_DECOMPRESSED_MAX_BYTES:
+                    raise DeckError(
+                        f"cannot decompress {member}: output exceeds "
+                        f"{APKG_DECOMPRESSED_MAX_BYTES} byte conversion limit"
+                    )
+        finally:
+            reader.close()
+    except DeckError:
+        raise
+    except Exception as exc:
+        raise DeckError(f"cannot decompress {member}: {exc}") from exc
+    return b"".join(chunks)
+
+
 def _apkg_database(path: Path) -> bytes:
     try:
         archive = zipfile.ZipFile(path, "r")
@@ -221,22 +254,25 @@ def _apkg_database(path: Path) -> bytes:
     with archive:
         names = set(archive.namelist())
         if "collection.anki21b" in names:
-            raise DeckError("collection.anki21b compressed APKG is unsupported; export UTF-8 TSV from Anki")
-        if "collection.anki21" in names:
+            member = "collection.anki21b"
+        elif "collection.anki21" in names:
             member = "collection.anki21"
         elif "collection.anki2" in names:
             member = "collection.anki2"
         else:
             member = None
         if member is None:
-            raise DeckError("APKG must contain collection.anki2 or collection.anki21")
+            raise DeckError("APKG must contain collection.anki2, collection.anki21, or collection.anki21b")
         info = archive.getinfo(member)
         if info.file_size > APKG_DB_MAX_BYTES:
             raise DeckError(f"APKG collection exceeds {APKG_DB_MAX_BYTES} byte conversion limit")
         try:
-            return archive.read(member)
+            blob = archive.read(member)
         except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
             raise DeckError(f"cannot read APKG collection: {exc}") from exc
+        if member == "collection.anki21b":
+            return _decompress_anki21b(blob, member)
+        return blob
 
 
 def _field_names(model: dict) -> list[str]:
@@ -322,6 +358,12 @@ def _table_names(connection: sqlite3.Connection) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
+def _leaf_deck_name(name: str) -> str:
+    """Schema-18 decks nest with \x1F separators (older exports use ::); the device is flat."""
+    leaf = name.replace("\x1f", "::").split("::")[-1]
+    return leaf.strip()
+
+
 def _selected_cards(connection: sqlite3.Connection, only_decks: set[str] | None, *, schema18: bool) -> list[Card]:
     try:
         if schema18:
@@ -353,6 +395,7 @@ def _selected_cards(connection: sqlite3.Connection, only_decks: set[str] | None,
             deck_name = decks.get(int(row["did"]))
             if deck_name is None:
                 raise DeckError(f"card {row['cid']} references a missing deck")
+            deck_name = _leaf_deck_name(deck_name)
             if only_decks is not None and deck_name not in only_decks:
                 continue
             note_id = int(row["nid"])
@@ -389,8 +432,8 @@ def read_sqlite_collection(connection: sqlite3.Connection, only_decks: set[str] 
 
 def _read_apkg(path: Path) -> list[Card]:
     database = _apkg_database(path)
-    if len(database) > APKG_DB_MAX_BYTES:
-        raise DeckError("APKG collection exceeds conversion limit")
+    if len(database) > APKG_DECOMPRESSED_MAX_BYTES:
+        raise DeckError(f"APKG collection exceeds {APKG_DECOMPRESSED_MAX_BYTES} byte conversion limit")
     try:
         with tempfile.TemporaryDirectory(prefix="passport-anki-") as directory:
             db_path = Path(directory) / "collection.sqlite"
@@ -654,11 +697,11 @@ def _parser() -> argparse.ArgumentParser:
     for sub in (decks, pull, sync):
         sub.add_argument("--url", default=None, help="AnkiConnect URL, default http://127.0.0.1:8765 when no collection is given")
         sub.add_argument("--api-key", default=None, help="AnkiConnect API key; this is not an AnkiWeb password")
-    decks.add_argument("--collection", type=Path, help="read-only collection.anki2 or collection.anki21")
+    decks.add_argument("--collection", type=Path, help="read-only collection.anki2, collection.anki21, or collection.anki21b")
     pull.add_argument("--deck", action="append", required=True, help="deck name; repeat to select more than one")
     pull.add_argument("--output", required=True, type=Path)
     pull.add_argument("--map", type=Path, help="device id to Anki card id JSON; user data, not for git")
-    pull.add_argument("--collection", type=Path, help="read-only collection.anki2 or collection.anki21")
+    pull.add_argument("--collection", type=Path, help="read-only collection.anki2, collection.anki21, or collection.anki21b")
     pull.add_argument("--upload", action="store_true", help="upload the TSV over the v2 chunked USB protocol")
     pull.add_argument("--port")
     pull.add_argument("--baudrate", type=int, default=115200)
