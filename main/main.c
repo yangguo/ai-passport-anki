@@ -71,6 +71,8 @@ static bool confirming_day, grade_save_failed;
 static const char *last_error = "";
 static uint8_t setting_brightness = 70;
 static uint8_t setting_sleep_min = 3;
+static uint8_t setting_autopage_sec = 0;
+static int64_t page_shown_us;
 static bool battery_usable = false;
 static bool screen_dimmed = false;
 static int64_t last_activity_us, dim_start_us;
@@ -286,8 +288,9 @@ static const char *deck_selected(void) {
     return pa_store_deck_name(&store, deck_index);
 }
 
-/* Deck list has the decks, then "next day", brightness, sleep, battery rows. */
-#define DECK_EXTRA_ROWS 4u
+/* Deck list: stats summary, decks..., then "next day", brightness, sleep,
+ * auto-page, battery rows. */
+#define DECK_EXTRA_ROWS 5u
 
 static uint16_t deck_entries(void) { return (uint16_t)(deck_count() + DECK_EXTRA_ROWS); }
 
@@ -323,6 +326,16 @@ static const char *brightness_label(uint8_t level)
     case 30: return "暗";
     case 100: return "亮";
     default: return "中";
+    }
+}
+
+static const char *autopage_label(uint8_t sec)
+{
+    switch (sec) {
+    case 3: return "3秒";
+    case 5: return "5秒";
+    case 10: return "10秒";
+    default: return "关";
     }
 }
 
@@ -394,36 +407,55 @@ static void render(void) {
     uint16_t count = deck_count();
     if (ui == UI_DECKS) {
         static uint16_t due[PA_STORE_MAX_DECKS];
-        const uint16_t extra = deck_index >= count ? (uint16_t)(deck_index - count) : 0u;
-        if (count == 0 && extra == 0u) {
-            snprintf(body, sizeof(body), "还没有牌组\n通过 USB 导入 TSV\n\n学习日 %" PRIu32, day);
-            snprintf(footer, sizeof(footer), "OK 推进学习日");
-        } else if (extra == 0u) {
-            snprintf(body, sizeof(body), "推进到下一学习日？\n\n当前学习日 %" PRIu32, day);
-            snprintf(footer, sizeof(footer), "OK 确认推进");
-        } else if (extra == 1u) {
-            snprintf(body, sizeof(body), "亮度：%s\n\nOK 切换 暗/中/亮\n当前 %" PRIu32 "%%",
-                     brightness_label(setting_brightness), (uint32_t)setting_brightness);
-            snprintf(footer, sizeof(footer), "OK 切换");
-        } else if (extra == 2u) {
-            snprintf(body, sizeof(body), "休眠：%" PRIu32 " 分钟无操作熄屏\n\nOK 切换 1/3/5 分钟\n熄屏 5 分钟后深睡",
-                     (uint32_t)setting_sleep_min);
-            snprintf(footer, sizeof(footer), "OK 切换");
-        } else if (extra == 3u) {
-            int soc = battery_usable ? bsp_battery_soc() : -1;
-            if (soc < 0) {
-                snprintf(body, sizeof(body), "电量：不可用\n\n电量计未响应");
-            } else {
-                snprintf(body, sizeof(body), "电量：%d%%\n\n%s", soc,
-                         soc <= 20 ? "电量低，请充电" : "剩余电量");
-            }
-            snprintf(footer, sizeof(footer), "OK 返回");
-        } else if (deck_index < count) {
+        if (deck_index == 0 && count > 0) {
+            uint32_t total_due = 0;
+            uint32_t by_rating[4] = {0, 0, 0, 0}, today_total = 0;
             pa_store_due_counts(&store, due);
-            snprintf(body, sizeof(body), "%s·到期%u\n%u / %u\n学习日 %" PRIu32,
-                     deck_selected() ? deck_selected() : "还没有牌组", (unsigned)due[deck_index],
-                     deck_index + 1, count, day);
-            snprintf(footer, sizeof(footer), "OK 开始");
+            for (uint16_t i = 0; i < count; ++i) total_due += due[i];
+            pa_store_today_stats(&store, by_rating, &today_total);
+            snprintf(body, sizeof(body), "今日已评 %" PRIu32 "（%u/%u/%u/%u）\n待学 %" PRIu32 " · %u 牌组\n学习日 %" PRIu32,
+                     today_total, (unsigned)by_rating[0], (unsigned)by_rating[1],
+                     (unsigned)by_rating[2], (unsigned)by_rating[3],
+                     total_due, count, day);
+            snprintf(footer, sizeof(footer), "上下翻页 OK 进牌组");
+        } else {
+            const uint16_t extra = deck_index >= count + 1u ? (uint16_t)(deck_index - count - 1u)
+                                                            : 0u;
+            if (count == 0 && deck_index == 0) {
+                snprintf(body, sizeof(body), "还没有牌组\n通过 USB 导入 TSV\n\n学习日 %" PRIu32, day);
+                snprintf(footer, sizeof(footer), "OK 推进学习日");
+            } else if (deck_index - 1u < count) {
+                const uint16_t shown = (uint16_t)(deck_index - 1u);
+                pa_store_due_counts(&store, due);
+                snprintf(body, sizeof(body), "%s·到期%u\n%u / %u\n学习日 %" PRIu32,
+                         deck_selected() && shown < count ? pa_store_deck_name(&store, shown) : "还没有牌组",
+                         (unsigned)due[shown], (unsigned)(shown + 1u), count, day);
+                snprintf(footer, sizeof(footer), "OK 开始");
+            } else if (extra == 0u) {
+                snprintf(body, sizeof(body), "推进到下一学习日？\n\n当前学习日 %" PRIu32, day);
+                snprintf(footer, sizeof(footer), "OK 确认推进");
+            } else if (extra == 1u) {
+                snprintf(body, sizeof(body), "亮度：%s\n\nOK 切换 暗/中/亮\n当前 %" PRIu32 "%%",
+                         brightness_label(setting_brightness), (uint32_t)setting_brightness);
+                snprintf(footer, sizeof(footer), "OK 切换");
+            } else if (extra == 2u) {
+                snprintf(body, sizeof(body), "休眠：%" PRIu32 " 分钟无操作熄屏\n\nOK 切换 1/3/5 分钟\n熄屏 5 分钟后深睡",
+                         (uint32_t)setting_sleep_min);
+                snprintf(footer, sizeof(footer), "OK 切换");
+            } else if (extra == 3u) {
+                snprintf(body, sizeof(body), "自动翻页：%s\n\nOK 切换 关/3秒/5秒/10秒\n多页卡面到时自动下翻",
+                         autopage_label(setting_autopage_sec));
+                snprintf(footer, sizeof(footer), "OK 切换");
+            } else if (extra == 4u) {
+                int soc = battery_usable ? bsp_battery_soc() : -1;
+                if (soc < 0) {
+                    snprintf(body, sizeof(body), "电量：不可用\n\n电量计未响应");
+                } else {
+                    snprintf(body, sizeof(body), "电量：%d%%\n\n%s", soc,
+                             soc <= 20 ? "电量低，请充电" : "剩余电量");
+                }
+                snprintf(footer, sizeof(footer), "OK 返回");
+            }
         }
     } else if (ui == UI_QUESTION || ui == UI_ANSWER || ui == UI_RATING) {
         const char *text = ui == UI_QUESTION ? card_front : card_back;
@@ -720,6 +752,31 @@ static void begin_deck(void) {
     if (!load_current_card()) { ui = UI_ERROR; last_error = "无法读取卡片"; return; }
     ui = UI_QUESTION;
     question_page = answer_page = 0;
+    page_shown_us = esp_timer_get_time();
+}
+
+static void begin_deck_summary_or_deck(uint16_t count, uint16_t base)
+{
+    /* Stats row (index 0): start the first due deck. Deck rows sit at base+deck. */
+    if (deck_index == 0) {
+        if (storage_corrupt) { ui = UI_ERROR; return; }
+        for (uint16_t i = 0; i < count; ++i) {
+            session.current = pa_store_next(&store, pa_store_deck_name(&store, i));
+            if (session.current != PA_NO_CARD) break;
+        }
+        session.revealed = false;
+        if (session.current == PA_NO_CARD) { ui = UI_EMPTY; return; }
+        if (!load_current_card()) { ui = UI_ERROR; last_error = "无法读取卡片"; return; }
+        ui = UI_QUESTION;
+        question_page = answer_page = 0;
+        page_shown_us = esp_timer_get_time();
+        return;
+    }
+    const uint16_t picked = (uint16_t)(deck_index - base);
+    deck_index = picked;
+    begin_deck();
+    deck_index = (uint16_t)(picked + base);
+    (void)count;
 }
 
 static void do_grade(void) {
@@ -750,10 +807,13 @@ static void process_button(const event_t *event) {
     if (ui == UI_DECKS) {
         const uint16_t entries = deck_entries();
         if (entries == 0) { render(); return; }
+        /* Index 0 is the stats summary when decks exist; decks sit at 1..count. */
+        const uint16_t base = count > 0 ? 1u : 0u;
         if (event->button == BSP_BTN_UP) deck_index = (uint16_t)((deck_index + entries - 1) % entries);
         else if (event->button == BSP_BTN_DOWN) deck_index = (uint16_t)((deck_index + 1) % entries);
-        else if (deck_index == count) { confirming_day = true; ui = UI_CONFIRM_DAY; }
-        else if (count > 0 && deck_index == count + 1u) {
+        else if (count > 0 && (deck_index == 0 || deck_index == count + base)) begin_deck_summary_or_deck(count, base);
+        else if (deck_index == count + base) { confirming_day = true; ui = UI_CONFIRM_DAY; }
+        else if (count > 0 && deck_index == count + base + 1u) {
             static const uint8_t levels[] = {30, 70, 100};
             size_t next = 0;
             for (size_t i = 0; i < 3; ++i) {
@@ -762,10 +822,19 @@ static void process_button(const event_t *event) {
             setting_brightness = levels[next];
             bsp_display_backlight(setting_brightness);
             save_u8_setting("brightness", setting_brightness);
-        } else if (count > 0 && deck_index == count + 2u) {
+        } else if (count > 0 && deck_index == count + base + 2u) {
             setting_sleep_min = setting_sleep_min == 1u ? 3u : setting_sleep_min == 3u ? 5u : 1u;
             save_u8_setting("sleep_min", setting_sleep_min);
-        } else if (deck_index < count) begin_deck();
+        } else if (count > 0 && deck_index == count + base + 3u) {
+            setting_autopage_sec = setting_autopage_sec == 0u ? 3u : setting_autopage_sec == 3u ? 5u
+                                 : setting_autopage_sec == 5u ? 10u : 0u;
+            save_u8_setting("autopage_sec", setting_autopage_sec);
+        } else if (deck_index > base && deck_index < count + base) {
+            const uint16_t picked = (uint16_t)(deck_index - base);
+            deck_index = picked;
+            begin_deck();
+            deck_index = (uint16_t)(picked + base);
+        }
     } else if (ui == UI_CONFIRM_DAY) {
         if (event->button == BSP_BTN_UP || event->button == BSP_BTN_DOWN) confirming_day = !confirming_day;
         else if (!confirming_day) ui = UI_DECKS;
@@ -777,6 +846,7 @@ static void process_button(const event_t *event) {
         const char *text = ui == UI_QUESTION ? card_front : card_back;
         pa_text_page pages[PA_LAYOUT_MAX_PAGES]; size_t pages_count = pages_for(text, pages);
         uint16_t *page = ui == UI_QUESTION ? &question_page : &answer_page;
+        page_shown_us = esp_timer_get_time();
         if (event->button == BSP_BTN_UP && *page > 0) --*page;
         else if (event->button == BSP_BTN_DOWN && *page + 1 < pages_count) ++*page;
         else if (event->button == BSP_BTN_OK && ui == UI_QUESTION) { ui = UI_ANSWER; answer_page = 0; session.revealed = true; }
@@ -830,7 +900,21 @@ static void app_task(void *arg) {
                 check_idle_sleep(now);
             }
         } else if (event.type == EVENT_IDLE) {
-            check_idle_sleep(esp_timer_get_time());
+            int64_t now = esp_timer_get_time();
+            check_idle_sleep(now);
+            if (!screen_dimmed && setting_autopage_sec > 0 &&
+                (ui == UI_QUESTION || ui == UI_ANSWER)) {
+                const char *text = ui == UI_QUESTION ? card_front : card_back;
+                pa_text_page pages[PA_LAYOUT_MAX_PAGES];
+                size_t pages_count = pages_for(text, pages);
+                uint16_t *page = ui == UI_QUESTION ? &question_page : &answer_page;
+                if (pages_count > 1 && *page + 1 < pages_count &&
+                    now - page_shown_us >= (int64_t)setting_autopage_sec * 1000 * 1000) {
+                    (*page)++;
+                    page_shown_us = now;
+                    render();
+                }
+            }
         }
     }
 }
@@ -961,8 +1045,10 @@ void app_main(void) {
     {
         static const uint8_t brightness_levels[] = {30, 70, 100};
         static const uint8_t sleep_levels[] = {1, 3, 5};
+        static const uint8_t autopage_levels[] = {0, 3, 5, 10};
         setting_brightness = load_u8_setting("brightness", 70, brightness_levels, 3);
         setting_sleep_min = load_u8_setting("sleep_min", 3, sleep_levels, 3);
+        setting_autopage_sec = load_u8_setting("autopage_sec", 0, autopage_levels, 4);
         bsp_display_backlight(setting_brightness);
     }
     battery_usable = bsp_battery_init() == ESP_OK;
