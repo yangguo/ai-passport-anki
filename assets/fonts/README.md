@@ -6,11 +6,14 @@ To reproduce, install `pip install -r requirements-font.txt`, download `Sans/OTF
 
 ```bash
 python tools/generate_font.py              # pa_font_16 (default)
-python tools/generate_font.py --size 20    # pa_font_20
+python tools/collect_body_font_subset.py decks/demo.tsv /path/to/eggrolls-JLPT10k-v3.5.apkg
+python tools/generate_font.py --size 20    # pa_font_20 (script blocks + JLPT/demo subset)
 ```
 
 The script verifies the source hash, uses `lv_font_conv` 1.5.3 through `npx`, writes fonts and manifests, and records cmap coverage.
 
-The generator requests 22,447 codepoints: ASCII, Latin Extended, Greek, general punctuation, enclosed numbers, CJK punctuation plus hiragana and katakana, katakana phonetic extensions, CJK Unified Ideographs, and fullwidth forms. The pinned Noto Sans SC file contains 21,957 of them and omits 490. The added ranges cover the kana, pitch marks (`①`–`⑳`, `⓪`), ellipsis, and `α` used by the JLPT deck. Gaps that remain are parts of Latin Extended, Greek, and punctuation that are not in this OTF, plus `U+9FF0–U+9FFF` and some fullwidth codepoints. `tools/deck.py` checks each character against the `pa_font_16` manifest and reports the missing codepoint before upload (same coverage as `pa_font_20`).
+`pa_font_16` requests 22,447 codepoints: ASCII, Latin Extended, Greek, general punctuation, enclosed numbers, CJK punctuation plus hiragana and katakana, katakana phonetic extensions, CJK Unified Ideographs, and fullwidth forms. The pinned Noto Sans SC file contains 21,957 of them and omits 490. `tools/deck.py` checks deck names against the `pa_font_16` manifest.
 
-Each generated C source is on the order of 10 MiB as text. Linked flash size depends on the compiler and must be read from the firmware build report. Glyphs live in flash, not DRAM.
+`pa_font_20` keeps the same non-Hanzi script blocks as `pa_font_16`, but CJK unified ideographs come only from `assets/fonts/pa_font_20.subset.json`. That file lists front/back codepoints collected from `decks/demo.tsv` and the pinned `eggrolls-JLPT10k-v3.5` APKG via `tools/collect_body_font_subset.py`. `tools/deck.py` checks study card front/back against the `pa_font_20` manifest. The device COMMIT path validates layout with `pa_font_20` on front/back only.
+
+Each generated C source is several MiB as text. Linked flash size depends on the compiler and must be read from the firmware build report. Glyphs live in flash, not DRAM.

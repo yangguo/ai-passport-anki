@@ -7,5 +7,6 @@ __pycache__/
 .DS_Store
 
 work/
+.esp-idf/
 .venv/
 .pytest_cache/
