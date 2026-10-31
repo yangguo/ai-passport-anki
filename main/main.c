@@ -67,6 +67,8 @@ static event_t idle_event_storage = {.type = EVENT_IDLE};
 static ui_state ui = UI_DECKS;
 static pa_rating selected_rating = PA_GOOD;
 static uint16_t deck_index, question_page, answer_page;
+static bool study_all = false;
+static uint16_t study_deck = 0;
 static bool confirming_day, grade_save_failed;
 static const char *last_error = "";
 static uint8_t setting_brightness = 70;
@@ -284,20 +286,28 @@ static size_t pages_for(const char *text, pa_text_page pages[PA_LAYOUT_MAX_PAGES
 
 static uint16_t deck_count(void) { return pa_store_deck_count(&store); }
 
-static const char *deck_selected(void) {
-    return pa_store_deck_name(&store, deck_index);
-}
-
 /* Deck list: stats summary, decks..., then "next day", brightness, sleep,
  * auto-page, battery rows. */
 #define DECK_EXTRA_ROWS 5u
 
-static uint16_t deck_entries(void) { return (uint16_t)(deck_count() + DECK_EXTRA_ROWS); }
+static uint16_t deck_entries(void)
+{
+    uint16_t count = deck_count();
+    /* Index 0 is the stats summary when decks exist (the empty message when
+     * none); decks sit at 1..count, then the DECK_EXTRA_ROWS setting rows. */
+    return count > 0 ? (uint16_t)(count + 1u + DECK_EXTRA_ROWS)
+                     : (uint16_t)(DECK_EXTRA_ROWS + 1u);
+}
 
 static void clamp_deck_index(void) {
     uint16_t entries = deck_entries();
     if (entries == 0 || deck_index > entries - 1u) {
         deck_index = entries ? (uint16_t)(entries - 1u) : 0;
+    }
+    uint16_t count = deck_count();
+    if (count > 0 && study_deck >= count) {
+        study_deck = 0;
+        study_all = true;
     }
 }
 
@@ -428,7 +438,7 @@ static void render(void) {
                 const uint16_t shown = (uint16_t)(deck_index - 1u);
                 pa_store_due_counts(&store, due);
                 snprintf(body, sizeof(body), "%s·到期%u\n%u / %u\n学习日 %" PRIu32,
-                         deck_selected() && shown < count ? pa_store_deck_name(&store, shown) : "还没有牌组",
+                         shown < count ? pa_store_deck_name(&store, shown) : "还没有牌组",
                          (unsigned)due[shown], (unsigned)(shown + 1u), count, day);
                 snprintf(footer, sizeof(footer), "OK 开始");
             } else if (extra == 0u) {
@@ -497,10 +507,13 @@ static void render(void) {
     } else if (ui == UI_EMPTY) {
         uint32_t by_rating[4] = {0, 0, 0, 0}, today_total = 0;
         pa_store_today_stats(&store, by_rating, &today_total);
-        snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n今日已评 %" PRIu32 "（%u/%u/%u/%u）\n可推进学习日。",
-                 deck_selected() ? deck_selected() : "全部", today_total,
-                 (unsigned)by_rating[0], (unsigned)by_rating[1],
-                 (unsigned)by_rating[2], (unsigned)by_rating[3]);
+        {
+            const char *study_name = study_all ? "全部" : pa_store_deck_name(&store, study_deck);
+            snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n今日已评 %" PRIu32 "（%u/%u/%u/%u）\n可推进学习日。",
+                     study_name != NULL ? study_name : "全部", today_total,
+                     (unsigned)by_rating[0], (unsigned)by_rating[1],
+                     (unsigned)by_rating[2], (unsigned)by_rating[3]);
+        }
         snprintf(footer, sizeof(footer), "OK 重新检查");
     } else if (ui == UI_CONFIRM_DAY) {
         snprintf(body, sizeof(body), "推进学习日 +1？\n\n当前选择：%s\n设备时间保持不变。",
@@ -744,9 +757,23 @@ static void check_idle_sleep(int64_t now)
     }
 }
 
-static void begin_deck(void) {
+/* Study context survives menu-index restores: the old begin_deck() read the
+ * menu cursor (deck_index), so after the stats row shifted decks to 1..count
+ * the first deck row had no OK branch and grading re-entered the wrong deck. */
+static void begin_study(void) {
     if (storage_corrupt) { ui = UI_ERROR; return; }
-    session.current = pa_store_next(&store, deck_selected());
+    session.current = PA_NO_CARD;
+    if (study_all) {
+        for (uint16_t i = 0; i < pa_store_deck_count(&store); ++i) {
+            session.current = pa_store_next(&store, pa_store_deck_name(&store, i));
+            if (session.current != PA_NO_CARD) break;
+        }
+    } else {
+        const char *name = pa_store_deck_name(&store, study_deck);
+        if (name != NULL) {
+            session.current = pa_store_next(&store, name);
+        }
+    }
     session.revealed = false;
     if (session.current == PA_NO_CARD) { ui = UI_EMPTY; return; }
     if (!load_current_card()) { ui = UI_ERROR; last_error = "无法读取卡片"; return; }
@@ -755,28 +782,17 @@ static void begin_deck(void) {
     page_shown_us = esp_timer_get_time();
 }
 
-static void begin_deck_summary_or_deck(uint16_t count, uint16_t base)
-{
-    /* Stats row (index 0): start the first due deck. Deck rows sit at base+deck. */
-    if (deck_index == 0) {
-        if (storage_corrupt) { ui = UI_ERROR; return; }
-        for (uint16_t i = 0; i < count; ++i) {
-            session.current = pa_store_next(&store, pa_store_deck_name(&store, i));
-            if (session.current != PA_NO_CARD) break;
+static bool study_has_due(void) {
+    if (study_all) {
+        for (uint16_t i = 0; i < pa_store_deck_count(&store); ++i) {
+            if (pa_store_next(&store, pa_store_deck_name(&store, i)) != PA_NO_CARD) {
+                return true;
+            }
         }
-        session.revealed = false;
-        if (session.current == PA_NO_CARD) { ui = UI_EMPTY; return; }
-        if (!load_current_card()) { ui = UI_ERROR; last_error = "无法读取卡片"; return; }
-        ui = UI_QUESTION;
-        question_page = answer_page = 0;
-        page_shown_us = esp_timer_get_time();
-        return;
+        return false;
     }
-    const uint16_t picked = (uint16_t)(deck_index - base);
-    deck_index = picked;
-    begin_deck();
-    deck_index = (uint16_t)(picked + base);
-    (void)count;
+    const char *name = pa_store_deck_name(&store, study_deck);
+    return name != NULL && pa_store_next(&store, name) != PA_NO_CARD;
 }
 
 static void do_grade(void) {
@@ -786,7 +802,7 @@ static void do_grade(void) {
         return;
     }
     grade_save_failed = false;
-    begin_deck();
+    begin_study();
 }
 
 static void process_button(const event_t *event) {
@@ -807,13 +823,21 @@ static void process_button(const event_t *event) {
     if (ui == UI_DECKS) {
         const uint16_t entries = deck_entries();
         if (entries == 0) { render(); return; }
-        /* Index 0 is the stats summary when decks exist; decks sit at 1..count. */
-        const uint16_t base = count > 0 ? 1u : 0u;
+        /* Index 0 is the stats summary when decks exist (the empty message
+         * when none); decks sit at 1..count, then the setting rows starting
+         * at settings_base (next day, brightness, sleep, auto-page, battery). */
+        const uint16_t settings_base = count > 0 ? (uint16_t)(count + 1u) : 1u;
         if (event->button == BSP_BTN_UP) deck_index = (uint16_t)((deck_index + entries - 1) % entries);
         else if (event->button == BSP_BTN_DOWN) deck_index = (uint16_t)((deck_index + 1) % entries);
-        else if (count > 0 && (deck_index == 0 || deck_index == count + base)) begin_deck_summary_or_deck(count, base);
-        else if (deck_index == count + base) { confirming_day = true; ui = UI_CONFIRM_DAY; }
-        else if (count > 0 && deck_index == count + base + 1u) {
+        else if (count > 0 && deck_index == 0) { study_all = true; study_deck = 0; begin_study(); }
+        else if (count > 0 && deck_index >= 1u && deck_index <= count) {
+            study_all = false;
+            study_deck = (uint16_t)(deck_index - 1u);
+            begin_study();
+        }
+        else if (deck_index == settings_base ||
+                 (count == 0 && deck_index == 0)) { confirming_day = true; ui = UI_CONFIRM_DAY; }
+        else if (deck_index == settings_base + 1u) {
             static const uint8_t levels[] = {30, 70, 100};
             size_t next = 0;
             for (size_t i = 0; i < 3; ++i) {
@@ -822,18 +846,17 @@ static void process_button(const event_t *event) {
             setting_brightness = levels[next];
             bsp_display_backlight(setting_brightness);
             save_u8_setting("brightness", setting_brightness);
-        } else if (count > 0 && deck_index == count + base + 2u) {
+        } else if (deck_index == settings_base + 2u) {
             setting_sleep_min = setting_sleep_min == 1u ? 3u : setting_sleep_min == 3u ? 5u : 1u;
             save_u8_setting("sleep_min", setting_sleep_min);
-        } else if (count > 0 && deck_index == count + base + 3u) {
+        } else if (deck_index == settings_base + 3u) {
             setting_autopage_sec = setting_autopage_sec == 0u ? 3u : setting_autopage_sec == 3u ? 5u
                                  : setting_autopage_sec == 5u ? 10u : 0u;
             save_u8_setting("autopage_sec", setting_autopage_sec);
-        } else if (deck_index > base && deck_index < count + base) {
-            const uint16_t picked = (uint16_t)(deck_index - base);
-            deck_index = picked;
-            begin_deck();
-            deck_index = (uint16_t)(picked + base);
+        } else if (deck_index == settings_base + 4u) {
+            /* Battery row is read-only; OK gives visible feedback by
+             * returning to the stats summary instead of doing nothing. */
+            deck_index = 0;
         }
     } else if (ui == UI_CONFIRM_DAY) {
         if (event->button == BSP_BTN_UP || event->button == BSP_BTN_DOWN) confirming_day = !confirming_day;
@@ -855,7 +878,7 @@ static void process_button(const event_t *event) {
         if (event->button == BSP_BTN_UP) selected_rating = (pa_rating)((selected_rating + 3) % 4);
         else if (event->button == BSP_BTN_DOWN) selected_rating = (pa_rating)((selected_rating + 1) % 4);
         else do_grade();
-    } else if (ui == UI_EMPTY && event->button == BSP_BTN_OK) begin_deck();
+    } else if (ui == UI_EMPTY && event->button == BSP_BTN_OK) begin_study();
     render();
 }
 
@@ -894,7 +917,7 @@ static void app_task(void *arg) {
                 if (elapsed && pa_store_advance(&store, elapsed)) {
                     last_clock_us += (int64_t)elapsed * MINUTE_US;
                     if (now - last_checkpoint >= 5 * MINUTE_US && pa_store_checkpoint(&store)) last_checkpoint = now;
-                    if (ui == UI_EMPTY && pa_store_next(&store, deck_selected()) != PA_NO_CARD) begin_deck();
+                    if (ui == UI_EMPTY && study_has_due()) begin_study();
                     render();
                 }
                 check_idle_sleep(now);
