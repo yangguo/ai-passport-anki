@@ -17,7 +17,7 @@
 
 [成功固件构建](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196721)、[成功主机测试](https://github.com/yangguo/ai-passport-anki/actions/runs/38131196776)。具体记录见 [acceptance.md](acceptance.md)。
 
-范围：最多 12,000 张多牌组纯文本、三键分页、四评分简化调度、分区存档、USB 分块导入。导入替换整组并清零复习历史；从旧 PAK1 迁移时保留复习状态。学习时钟不计关机时间。电脑可以读取本机 Anki 并把评分经 AnkiConnect 交回，由用户在官方 Anki 里同步 AnkiWeb。设备不上网，不保存凭据。不包含 FSRS、设备端 AnkiWeb、图片/音频、完整 Anki 模板或 anki21b。
+范围：最多 12,000 张多牌组纯文本、三键分页、四评分简化调度、分区存档、USB 分块导入。导入替换整组并清零复习历史；从旧 PAK1 迁移时保留复习状态。学习时钟不计关机时间。电脑可以读取本机 Anki 并把评分经 AnkiConnect 交回，由用户在官方 Anki 里同步 AnkiWeb。设备不上网，不保存凭据。不包含 FSRS、设备端 AnkiWeb、图片/音频、完整 Anki 模板；`collection.anki21b`（zstd）已支持。
 
 ## 万张容量（2026-10-11）
 
