@@ -200,7 +200,7 @@ PAK1（magic `PAK1`，version 1，末尾 CRC32）仍是迁移输入。解码失�
 
 规范 TSV：UTF-8（允许 BOM），标题 `id\tdeck\tfront\tback`。使用 Python csv delimiter=tab，支持引用字段内的真实换行；ID 十进制1..UINT32_MAX。可支持 Anki文本导出（前/后两列，#分隔符/HTML注释），规范化由工具完成。
 
-旧式 APKG：只读 zip 内的 SQLite。同时存在 `collection.anki21` 和较小的 `collection.anki2` 时用 anki21（JLPT 包里的 anki2 是空壳）。`collection.anki21b` 解压后同读（上限 64 MiB）；多成员按 anki21b > anki21 > anki2 取。同时存在 `collection.anki21` 和较小的 `collection.anki2` 时用 anki21（JLPT 包里的 anki2 是空壳）。不解压媒体，不执行 SQL 扩展或模板脚本。Basic 模型取前两个文本字段。字段名含 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组按 JLPT 规则转换：正面是词条，若注音不同再加一行；背面依次放声调、词性、简体释义、补充、第一条例句注音和简体例句释义。先去掉 `[sound:...]` 和图片标签，HTML 转成纯文本并保留 `<br>` 换行，再把 `汉字[假名]` 收成 `汉字（假名）`。背面超过 511 字节时先丢掉补充，再丢掉例句释义，仍然超出就报错，不截断。Cloze 和其它模型拒绝。一台笔记多张卡拒绝。
+旧式 APKG：只读 zip 内的 SQLite。同时存在 `collection.anki21` 和较小的 `collection.anki2` 时用 anki21（JLPT 包里的 anki2 是空壳）。`collection.anki21b` 解压后同读（压缩不超 16 MiB、解压后上限 64 MiB）；多成员按 anki21b > anki21 > anki2 取。不解压媒体，不执行 SQL 扩展或模板脚本。Basic 模型取前两个文本字段。字段名含 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组按 JLPT 规则转换：正面是词条，若注音不同再加一行；背面依次放声调、词性、简体释义、补充、第一条例句注音和简体例句释义。先去掉 `[sound:...]` 和图片标签，HTML 转成纯文本并保留 `<br>` 换行，再把 `汉字[假名]` 收成 `汉字（假名）`。背面超过 511 字节时先丢掉补充，再丢掉例句释义，仍然超出就报错，不截断。Cloze 和其它模型拒绝。一台笔记多张卡拒绝。
 
 行协议 ASCII，正文 hex编码UTF-8；最大行1200字节，串口输入超过上限必须丢弃整个行并报错。reader遇到断线/半行不能重复上一命令。
 

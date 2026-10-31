@@ -383,3 +383,24 @@ def test_apkg_nested_deck_names_use_leaf(tmp_path):
     _make_anki21b_apkg(path, db_path)
     cards = deck.load_deck(path)
     assert [(card.deck, card.front) for card in cards] == [("1-高频", "Q1"), ("Child", "Q2")]
+
+
+def test_apkg_anki21b_decompressed_cap_matches_design(tmp_path, monkeypatch):
+    db_path = tmp_path / "tiny.sqlite"
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TABLE col (models TEXT, decks TEXT)")
+    db.execute("CREATE TABLE notes (id INTEGER, mid INTEGER, flds TEXT)")
+    db.execute("CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER)")
+    db.execute("INSERT INTO col VALUES (?, ?)", (
+        '{"10":{"id":10,"name":"Basic","type":0,"flds":[{"name":"Front"},{"name":"Back"}]}}',
+        '{"20":{"id":20,"name":"D"}}',
+    ))
+    db.execute("INSERT INTO notes VALUES (1, 10, 'Q\x1fA')")
+    db.execute("INSERT INTO cards VALUES (1, 1, 20)")
+    db.commit()
+    db.close()
+    monkeypatch.setattr(deck, "APKG_DECOMPRESSED_MAX_BYTES", db_path.stat().st_size - 1)
+    path = tmp_path / "capped.apkg"
+    _make_anki21b_apkg(path, db_path)
+    with pytest.raises(deck.DeckError, match="cannot decompress"):
+        deck.load_deck(path)

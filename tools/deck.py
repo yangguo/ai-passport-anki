@@ -222,9 +222,28 @@ def _decompress_anki21b(data: bytes, member: str) -> bytes:
             f"{member} is zstd-compressed; install it with: pip install -r requirements.txt"
         ) from exc
     try:
-        return zstandard.ZstdDecompressor().decompress(data, max_output_size=APKG_DECOMPRESSED_MAX_BYTES)
+        reader = zstandard.ZstdDecompressor().stream_reader(data)
+        try:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                piece = reader.read(min(1 << 20, APKG_DECOMPRESSED_MAX_BYTES + 1 - total))
+                if not piece:
+                    break
+                chunks.append(piece)
+                total += len(piece)
+                if total > APKG_DECOMPRESSED_MAX_BYTES:
+                    raise DeckError(
+                        f"cannot decompress {member}: output exceeds "
+                        f"{APKG_DECOMPRESSED_MAX_BYTES} byte conversion limit"
+                    )
+        finally:
+            reader.close()
+    except DeckError:
+        raise
     except Exception as exc:
         raise DeckError(f"cannot decompress {member}: {exc}") from exc
+    return b"".join(chunks)
 
 
 def _apkg_database(path: Path) -> bytes:
@@ -413,8 +432,8 @@ def read_sqlite_collection(connection: sqlite3.Connection, only_decks: set[str] 
 
 def _read_apkg(path: Path) -> list[Card]:
     database = _apkg_database(path)
-    if len(database) > APKG_DB_MAX_BYTES:
-        raise DeckError("APKG collection exceeds conversion limit")
+    if len(database) > APKG_DECOMPRESSED_MAX_BYTES:
+        raise DeckError(f"APKG collection exceeds {APKG_DECOMPRESSED_MAX_BYTES} byte conversion limit")
     try:
         with tempfile.TemporaryDirectory(prefix="passport-anki-") as directory:
             db_path = Path(directory) / "collection.sqlite"
@@ -678,11 +697,11 @@ def _parser() -> argparse.ArgumentParser:
     for sub in (decks, pull, sync):
         sub.add_argument("--url", default=None, help="AnkiConnect URL, default http://127.0.0.1:8765 when no collection is given")
         sub.add_argument("--api-key", default=None, help="AnkiConnect API key; this is not an AnkiWeb password")
-    decks.add_argument("--collection", type=Path, help="read-only collection.anki2 or collection.anki21")
+    decks.add_argument("--collection", type=Path, help="read-only collection.anki2, collection.anki21, or collection.anki21b")
     pull.add_argument("--deck", action="append", required=True, help="deck name; repeat to select more than one")
     pull.add_argument("--output", required=True, type=Path)
     pull.add_argument("--map", type=Path, help="device id to Anki card id JSON; user data, not for git")
-    pull.add_argument("--collection", type=Path, help="read-only collection.anki2 or collection.anki21")
+    pull.add_argument("--collection", type=Path, help="read-only collection.anki2, collection.anki21, or collection.anki21b")
     pull.add_argument("--upload", action="store_true", help="upload the TSV over the v2 chunked USB protocol")
     pull.add_argument("--port")
     pull.add_argument("--baudrate", type=int, default=115200)

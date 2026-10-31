@@ -220,7 +220,7 @@ def test_anki_connect_lists_pulls_and_reuses_device_ids(tmp_path, anki_server):
 
     server.dispatch = dispatch
     names = anki_sync.list_decks(deck, url=url, collection=None, api_key=None)
-    assert names == ["Language", "JLPT", "Other"]
+    assert names == ["JLPT", "Language", "Other"]
     map_path = tmp_path / "cards.map.json"
     cards, source, imported = anki_sync.pull_decks(
         deck, ["JLPT", "Language"], url=url, collection=None, api_key="local-key", map_path=map_path,
@@ -451,3 +451,55 @@ def test_collection_copy_accepts_anki21b_file(tmp_path):
     )
     assert source == "collection"
     assert cards == [deck.Card(1, "Language", "Question", "Answer", "99", "7")]
+
+
+def test_collection_21b_rejects_oversize_compressed(tmp_path):
+    import os
+
+    import zstandard
+    raw = os.urandom(deck.APKG_DB_MAX_BYTES + (1 << 20))
+    path = tmp_path / "collection.anki21b"
+    path.write_bytes(zstandard.ZstdCompressor().compress(raw))
+    assert path.stat().st_size > deck.APKG_DB_MAX_BYTES
+    with pytest.raises(deck.DeckError, match="conversion limit"):
+        anki_sync.list_decks(deck, url=None, collection=path, api_key=None)
+
+
+def test_collection_21b_rejects_oversize_decompressed(tmp_path, monkeypatch):
+    import zstandard
+    db_path = tmp_path / "plain.sqlite"
+    _schema18(db_path)
+    raw = db_path.read_bytes()
+    monkeypatch.setattr(deck, "APKG_DECOMPRESSED_MAX_BYTES", len(raw) - 1)
+    path = tmp_path / "collection.anki21b"
+    path.write_bytes(zstandard.ZstdCompressor().compress(raw))
+    with pytest.raises(deck.DeckError, match="anki21b"):
+        anki_sync.list_decks(deck, url=None, collection=path, api_key=None)
+
+
+def test_anki_connect_nested_deck_uses_leaf_name(tmp_path, anki_server):
+    server, url = anki_server
+    info = {
+        "cardId": 7, "note": 8, "deckName": "Parent::Child", "modelName": "Basic",
+        "mod": 100,
+        "fields": {"Front": {"value": "Q", "order": 0}, "Back": {"value": "A", "order": 1}},
+    }
+
+    def dispatch(action, params):
+        if action == "deckNames":
+            return ["Parent::Child", "Other"]
+        if action == "findCards":
+            assert "Parent::Child" in params["query"]
+            return [7]
+        if action == "cardsInfo":
+            assert params["cards"] == [7]
+            return [info]
+        raise AssertionError(action)
+
+    server.dispatch = dispatch
+    assert anki_sync.list_decks(deck, url=url, collection=None, api_key=None) == ["Child", "Other"]
+    cards, source, _imported = anki_sync.pull_decks(
+        deck, ["Child"], url=url, collection=None, api_key=None, map_path=None,
+    )
+    assert source == "anki-connect"
+    assert cards == [deck.Card(1, "Child", "Q", "A", "7", "8")]

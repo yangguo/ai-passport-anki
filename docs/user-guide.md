@@ -35,7 +35,7 @@ python3 tools/deck.py upload decks/local.tsv --port /dev/cu.usbmodem1101
 
 `--upload` 可以接在 `anki-pull` 后面，仍然要给 `--port`。映射 JSON 把设备上的 u32 id 对应到 Anki 卡片 id（字符串）。再次 pull 同一份映射时会尽量复用这些设备 id。这个文件和旁边的回写收据都是本地数据，不要提交进仓库。
 
-AnkiConnect 连不上时，可以只读集合文件。工具先把 `collection.anki2`、`collection.anki21` 或 `collection.anki21b` 复制到临时目录（压缩包先解压；未压缩的两个还带旁边的 `-wal`、`-shm`），再以只读方式打开副本，不写原文件。直接传 `.apkg` 文件也能导入（含 `anki21b` 的新包，如 `n3.apkg`）。Anki 进程还在时会警告：副本可能看不到尚未写盘的复习。更稳妥的做法是先退出 Anki。
+AnkiConnect 连不上时，可以只读集合文件。工具把 `collection.anki2`、`collection.anki21` 复制到临时目录（含旁边的 `-wal`、`-shm`）；压缩的 `collection.anki21b` 先解压为临时 SQLite 再只读打开，不复制 `-wal`/`-shm`。副本都不写回原文件。直接传 `.apkg` 文件也能导入（含 `anki21b` 的新包，如 `n3.apkg`）。Anki 进程还在时会警告：副本可能看不到尚未写盘的复习。更稳妥的做法是先退出 Anki。
 
 ```sh
 python3 tools/deck.py anki-decks --collection ~/.local/share/Anki2/User\ 1/collection.anki2
