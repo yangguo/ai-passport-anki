@@ -40,7 +40,7 @@ def test_parse_anki_text_export_with_two_fields(tmp_path):
     ("id\tdeck\tfront\tback\n4294967296\tD\tQ\tA\n", "id.*range"),
     ("id\tdeck\tfront\tback\n1\tD\tQ\t" + "x" * 512 + "\n", "511 bytes"),
     ("id\tdeck\tfront\tback\n1\tD\tQ\x01x\tA\n", "control"),
-    ("id\tdeck\tfront\tback\n1\tD\temoji 😀\tA\n", r"no pa_font_16 glyph.*U\+1F600"),
+    ("id\tdeck\tfront\tback\n1\tD\temoji 😀\tA\n", r"no pa_font_20 glyph.*U\+1F600"),
 ])
 def test_tsv_rejects_invalid_card_text(tmp_path, contents, message):
     path = tmp_path / "bad.tsv"
@@ -89,7 +89,7 @@ def test_commands_are_hex_encoded_bounded_and_finish_with_commit(tmp_path):
 def test_command_stream_rejects_embedded_nul_and_unsupported_glyph(tmp_path):
     path = tmp_path / "missing-font-glyph.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\t\u0104\tA\n", encoding="utf-8")
-    with pytest.raises(deck.DeckError, match=r"no pa_font_16 glyph.*U\+0104"):
+    with pytest.raises(deck.DeckError, match=r"no pa_font_20 glyph.*U\+0104"):
         deck.load_deck(path)
 
     path = tmp_path / "nul.tsv"
@@ -386,6 +386,14 @@ def test_font_manifest_records_actual_requested_range_coverage():
     assert covers(0x3042) and covers(0x30A2) and covers(0x30F6)
     assert covers(0x2460) and covers(0x2473) and covers(0x24EA)
     assert covers(0x03B1) and covers(0x2026)
+
+    body_path = Path(__file__).parents[1] / "assets" / "fonts" / "pa_font_20.manifest.json"
+    body = json.loads(body_path.read_text(encoding="utf-8"))
+    assert body["font_symbol"] == "pa_font_20"
+    assert body["supported_glyph_count"] < manifest["supported_glyph_count"]
+    assert body["body_subset_codepoint_count"] > 0
+    demo = deck.load_deck(Path(__file__).parents[1] / "decks" / "demo.tsv")
+    assert demo
 
 
 def test_apkg_nested_deck_names_use_leaf(tmp_path):

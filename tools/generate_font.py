@@ -15,6 +15,7 @@ PINNED_FONT_PATH = "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
 PINNED_LV_FONT_CONV = "1.5.3"
 PINNED_FONT_SHA256 = "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
 CANONICAL_FONT_PATH = Path("work/font-source/NotoSansCJKsc-Regular.otf")
+DEFAULT_BODY_SUBSET = Path("assets/fonts/pa_font_20.subset.json")
 REQUESTED_RANGES = (
     (0x0020, 0x007E),  # ASCII
     (0x00A0, 0x024F),  # Latin extended
@@ -26,6 +27,8 @@ REQUESTED_RANGES = (
     (0x4E00, 0x9FFF),  # CJK unified ideographs
     (0xFF00, 0xFFEF),  # halfwidth/fullwidth
 )
+# Study-body font keeps full script blocks except the CJK unified block; Hanzi come from the subset file.
+BODY_SCRIPT_RANGES = tuple(r for r in REQUESTED_RANGES if r != (0x4E00, 0x9FFF))
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -39,6 +42,35 @@ def spans(codepoints: set[int]) -> list[list[int]]:
     return result
 
 
+def load_body_subset(path: Path) -> tuple[set[int], dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        codepoints = {int(cp) for cp in data["codepoints"]}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(f"body subset file is missing or invalid: {path}: {exc}") from exc
+    if not codepoints:
+        raise SystemExit(f"body subset file lists no codepoints: {path}")
+    return codepoints, data
+
+
+def requested_for_size(size: int, subset_path: Path | None) -> tuple[set[int], list[list[int]], dict | None]:
+    if size != 20:
+        requested = {cp for start, end in REQUESTED_RANGES for cp in range(start, end + 1)}
+        return requested, [[start, end] for start, end in REQUESTED_RANGES], None
+    if subset_path is None:
+        subset_path = ROOT / DEFAULT_BODY_SUBSET
+    deck_codepoints, subset_meta = load_body_subset(subset_path)
+    script_codepoints = {cp for start, end in BODY_SCRIPT_RANGES for cp in range(start, end + 1)}
+    requested = script_codepoints | deck_codepoints
+    hanzi = {cp for cp in deck_codepoints if 0x4E00 <= cp <= 0x9FFF}
+    requested_ranges = [[start, end] for start, end in BODY_SCRIPT_RANGES]
+    requested_ranges.extend(spans(hanzi))
+    extra = deck_codepoints - script_codepoints - hanzi
+    if extra:
+        requested_ranges.extend(spans(extra))
+    return requested, requested_ranges, subset_meta
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--font", type=Path, default=ROOT / CANONICAL_FONT_PATH, help="Pinned Noto Sans SC Regular OTF")
@@ -46,6 +78,12 @@ def main() -> int:
     parser.add_argument("--symbol", type=str, default="", help="LVGL font symbol (default pa_font_<size>)")
     parser.add_argument("--output", type=Path, default=None, help="Output .c path (default assets/fonts/<symbol>.c)")
     parser.add_argument("--manifest", type=Path, default=None, help="Manifest path (default beside output)")
+    parser.add_argument(
+        "--subset",
+        type=Path,
+        default=None,
+        help="Study-body codepoint list for --size 20 (default assets/fonts/pa_font_20.subset.json)",
+    )
     args = parser.parse_args()
     if args.size < 8 or args.size > 48:
         parser.error("--size must be between 8 and 48")
@@ -70,7 +108,7 @@ def main() -> int:
     ttfont = TTFont(canonical_font)
     cmap = set(ttfont.getBestCmap())
     ttfont.close()
-    requested = {cp for start, end in REQUESTED_RANGES for cp in range(start, end + 1)}
+    requested, requested_ranges, subset_meta = requested_for_size(args.size, args.subset)
     available = requested & cmap
     missing = requested - cmap
     if not available:
@@ -87,13 +125,17 @@ def main() -> int:
         "source_file_sha256": font_hash,
         "license": "SIL Open Font License 1.1",
         "license_file": "OFL.txt",
-        "requested_ranges": [[start, end] for start, end in REQUESTED_RANGES],
+        "requested_ranges": requested_ranges,
         "supported_ranges": spans(available),
         "unsupported_ranges": spans(missing),
         "requested_glyph_count": len(requested),
         "supported_glyph_count": len(available),
         "unsupported_glyph_count": len(missing),
     }
+    if subset_meta is not None:
+        manifest_data["body_subset_sources"] = subset_meta.get("sources", [])
+        manifest_data["body_subset_codepoint_count"] = subset_meta.get("codepoint_count", len(subset_meta.get("codepoints", [])))
+
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -113,7 +155,13 @@ def main() -> int:
         parser.error("npx is required to run the pinned lv_font_conv generator")
     except subprocess.CalledProcessError as exc:
         return exc.returncode
-    print(f"Generated {len(available)} glyphs; {len(missing)} requested codepoints are absent and will be rejected by deck.py.")
+    if args.size == 20:
+        print(
+            f"Generated {len(available)} body-font glyphs from subset + script blocks; "
+            f"{len(missing)} requested codepoints are absent."
+        )
+    else:
+        print(f"Generated {len(available)} glyphs; {len(missing)} requested codepoints are absent and will be rejected by deck.py.")
     return 0
 
 

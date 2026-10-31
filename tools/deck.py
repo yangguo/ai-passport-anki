@@ -35,6 +35,7 @@ _INFO_REPLY = re.compile(r"OK INFO version=(\d+) cards=(\d+) day=(\d+) cap=(\d+)
 APKG_DB_MAX_BYTES = 16 * 1024 * 1024
 APKG_DECOMPRESSED_MAX_BYTES = 64 * 1024 * 1024
 FONT_MANIFEST = Path(__file__).resolve().parents[1] / "assets/fonts/pa_font_16.manifest.json"
+BODY_FONT_MANIFEST = Path(__file__).resolve().parents[1] / "assets/fonts/pa_font_20.manifest.json"
 
 
 class DeckError(Exception):
@@ -106,11 +107,26 @@ def _font_ranges() -> tuple[tuple[int, int], ...]:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise DeckError(f"font coverage manifest is missing or invalid: {exc}") from exc
 
+
+@lru_cache(maxsize=1)
+def _body_font_ranges() -> tuple[tuple[int, int], ...]:
+    try:
+        manifest = json.loads(BODY_FONT_MANIFEST.read_text(encoding="utf-8"))
+        ranges = manifest["supported_ranges"]
+        return tuple((int(start), int(end)) for start, end in ranges)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise DeckError(f"study body font manifest is missing or invalid: {exc}") from exc
+
+
 def _font_contains(codepoint: int) -> bool:
     return any(start <= codepoint <= end for start, end in _font_ranges())
 
 
-def _check_chars(value: str, where: str, *, allow_newline: bool = False) -> None:
+def _body_font_contains(codepoint: int) -> bool:
+    return any(start <= codepoint <= end for start, end in _body_font_ranges())
+
+
+def _check_chars(value: str, where: str, *, allow_newline: bool = False, body_font: bool = False) -> None:
     if "\x00" in value:
         raise DeckError(f"{where}: embedded NUL is not allowed")
     for char in value:
@@ -121,7 +137,10 @@ def _check_chars(value: str, where: str, *, allow_newline: bool = False) -> None
             raise DeckError(f"{where}: newline is not allowed")
         if codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
             raise DeckError(f"{where}: control character U+{codepoint:04X} is not allowed")
-        if not _font_contains(codepoint):
+        if body_font:
+            if not _body_font_contains(codepoint):
+                raise DeckError(f"{where}: no pa_font_20 glyph for U+{codepoint:04X}")
+        elif not _font_contains(codepoint):
             raise DeckError(f"{where}: no pa_font_16 glyph for U+{codepoint:04X}")
 
 
@@ -139,8 +158,8 @@ def _validate_card(card: Card, row: int) -> Card:
     if not card.back:
         raise DeckError(f"row {row}: back is empty")
     _check_chars(card.deck, f"row {row} deck")
-    _check_chars(card.front, f"row {row} front", allow_newline=True)
-    _check_chars(card.back, f"row {row} back", allow_newline=True)
+    _check_chars(card.front, f"row {row} front", allow_newline=True, body_font=True)
+    _check_chars(card.back, f"row {row} back", allow_newline=True, body_font=True)
     for name, value, limit in (("deck", card.deck, MAX_DECK_BYTES),
                                ("front", card.front, MAX_TEXT_BYTES),
                                ("back", card.back, MAX_TEXT_BYTES)):
@@ -338,6 +357,37 @@ def _jlpt_sides(fields: list[str], mapping: dict[str, int], note_id: int) -> tup
     return front, back
 
 
+def _study_body_text(model: dict, fields: list[str], note_id: int) -> tuple[str, str]:
+    """Return converted front/back for subset-font collection (no byte limits)."""
+    name = str(model.get("name", ""))
+    kind = int(model.get("type", -1))
+    if kind == 1 or name.lower() == "cloze" or any("{{c" in field.lower() for field in fields):
+        raise DeckError(f"Cloze note {note_id} is unsupported")
+    if _is_jlpt_model(model):
+        mapping = _field_map(model)
+        kanji = _take_field(fields, mapping, "VocabKanji")
+        furigana = _take_field(fields, mapping, "VocabFurigana")
+        if not kanji:
+            raise DeckError(f"JLPT note {note_id} has an empty VocabKanji field")
+        front = f"{kanji}\n{furigana}" if furigana and furigana != kanji else kanji
+        back = "\n".join(part for part in [
+            _take_field(fields, mapping, "VocabPitch"),
+            _take_field(fields, mapping, "VocabPoS"),
+            _take_field(fields, mapping, "VocabDefSC"),
+            _take_field(fields, mapping, "VocabPlus"),
+            _take_field(fields, mapping, "SentFurigana1"),
+            _take_field(fields, mapping, "SentDefSC1"),
+        ] if part)
+        if not back:
+            raise DeckError(f"JLPT note {note_id} has an empty back")
+        return front, back
+    if kind == 0 and name == "Basic":
+        if len(fields) < 2:
+            raise DeckError(f"Basic note {note_id} must have at least two text fields")
+        return _clean_field(fields[0]), _clean_field(fields[1])
+    raise DeckError(f"custom model {name!r} is unsupported; only Basic and JLPT fields are converted")
+
+
 def card_from_note(model: dict, fields: list[str], deck_name: str, note_id: int, anki_card_id: int,
                    device_id: int) -> Card:
     """Map one Anki note onto a device card. Basic and JLPT fields only; Cloze is rejected."""
@@ -464,6 +514,82 @@ def load_deck(filename: str | Path) -> list[Card]:
     if suffix in (".tsv", ".txt", ".anki"):
         return _read_tsv(path)
     raise DeckError("input must be a UTF-8 TSV/Anki text export or legacy .apkg")
+
+
+def collect_study_body_codepoints(filename: str | Path) -> set[int]:
+    """Collect front/back codepoints from a deck source for pa_font_20 subset generation."""
+    path = Path(filename)
+    codepoints: set[int] = set()
+
+    def absorb(front: str, back: str) -> None:
+        for field in (front, back):
+            for char in field:
+                if char != "\n":
+                    codepoints.add(ord(char))
+
+    suffix = path.suffix.lower()
+    if suffix in (".tsv", ".txt", ".anki"):
+        for card in load_deck(path):
+            absorb(card.front, card.back)
+        return codepoints
+    if suffix != ".apkg":
+        raise DeckError("input must be a UTF-8 TSV/Anki text export or legacy .apkg")
+    database = _apkg_database(path)
+    if len(database) > APKG_DECOMPRESSED_MAX_BYTES:
+        raise DeckError(f"APKG collection exceeds {APKG_DECOMPRESSED_MAX_BYTES} byte conversion limit")
+    with tempfile.TemporaryDirectory(prefix="passport-anki-") as directory:
+        db_path = Path(directory) / "collection.sqlite"
+        db_path.write_bytes(database)
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            tables = _table_names(connection)
+            if "notes" not in tables or "cards" not in tables:
+                raise DeckError("collection schema has no notes/cards tables")
+            schema18 = {"notetypes", "fields", "decks"} <= tables
+            if not schema18 and "col" not in tables:
+                raise DeckError("collection schema has neither notetypes nor col.models")
+            if schema18:
+                notetypes = {int(row["id"]): str(row["name"]) for row in connection.execute("SELECT id, name FROM notetypes")}
+                field_names: dict[int, list[str]] = {}
+                for row in connection.execute("SELECT ntid, ord, name FROM fields ORDER BY ntid, ord"):
+                    field_names.setdefault(int(row["ntid"]), []).append(str(row["name"]))
+                models = {
+                    ntid: {"name": name, "type": 1 if "cloze" in name.lower() else 0,
+                           "flds": [{"name": field} for field in field_names.get(ntid, [])]}
+                    for ntid, name in notetypes.items()
+                }
+                decks = {int(row["id"]): str(row["name"]) for row in connection.execute("SELECT id, name FROM decks")}
+            else:
+                collection = connection.execute("SELECT models, decks FROM col LIMIT 1").fetchone()
+                if collection is None:
+                    raise DeckError("collection has no metadata row")
+                models = {int(key): model for key, model in json.loads(collection["models"]).items()}
+                decks = {int(key): str(value.get("name", "")) for key, value in json.loads(collection["decks"]).items()}
+            notes = {int(row["id"]): row for row in connection.execute("SELECT id, mid, flds FROM notes")}
+            seen_notes: set[int] = set()
+            for row in connection.execute("SELECT id AS cid, nid, did FROM cards ORDER BY id"):
+                note_id = int(row["nid"])
+                if note_id in seen_notes:
+                    continue
+                seen_notes.add(note_id)
+                note = notes.get(note_id)
+                if note is None:
+                    continue
+                model = models.get(int(note["mid"]))
+                if not model:
+                    continue
+                fields = str(note["flds"]).split("\x1f")
+                try:
+                    front, back = _study_body_text(model, fields, note_id)
+                except DeckError:
+                    continue
+                absorb(front, back)
+        finally:
+            connection.close()
+    if not codepoints:
+        raise DeckError(f"no study-body codepoints found in {path}")
+    return codepoints
 
 
 def pack_card(card: Card) -> bytes:

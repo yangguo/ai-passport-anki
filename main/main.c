@@ -260,11 +260,13 @@ static bool text_fits(const char *text) {
 }
 
 static bool text_supported(const char *deck, const char *front, const char *back, void *user) {
+    (void)deck;
     (void)user;
     if ((++glyph_checks & 127u) == 0) {
         vTaskDelay(1);
     }
-    return text_fits(deck) && text_fits(front) && text_fits(back);
+    /* Deck titles use pa_font_16; only study card front/back use pa_font_20. */
+    return text_fits(front) && text_fits(back);
 }
 
 static size_t pages_for(const char *text, pa_text_page pages[PA_LAYOUT_MAX_PAGES]) {
