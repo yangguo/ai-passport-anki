@@ -92,6 +92,9 @@ def main() -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     output_arg = args.output.relative_to(ROOT) if args.output.resolve().is_relative_to(ROOT) else args.output
+    # Do not pass --no-compress. bpp 2 then sets bitmap_format to 1, and
+    # sdkconfig.defaults must keep CONFIG_LV_USE_FONT_COMPRESSED=y or the
+    # panel draws no glyphs.
     command = ["npx", "--yes", f"lv_font_conv@{PINNED_LV_FONT_CONV}", "--size", "16", "--bpp", "2",
                "--format", "lvgl", "--font", CANONICAL_FONT_PATH.as_posix(), "--no-kerning",
                "--lv-include", "lvgl.h", "--lv-font-name", "pa_font_16", "--output", str(output_arg)]

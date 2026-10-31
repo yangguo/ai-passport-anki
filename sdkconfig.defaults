@@ -18,6 +18,10 @@ CONFIG_LV_DEF_REFR_PERIOD=20
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_FMT_TXT_LARGE=y
+# pa_font_16 is lv_font_conv bpp 2 without --no-compress, so bitmap_format is 1
+# (RLE + prefilter). LVGL 9.5 returns no glyph bitmap unless this is on, and the
+# deck screen stays the near-black background with no text.
+CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_MEM_SIZE_KILOBYTES=24
 
 # --- 系统 ---
