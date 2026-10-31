@@ -216,7 +216,7 @@ def test_upload_waits_for_matching_ack_and_succeeds_only_after_commit(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
     serial = FakeSerial([
-        "boot: ready", "OK INFO version=2 cards=0 day=0 cap=12000",
+        "boot: ready", "OK INFO version=2 cards=0 day=0 cap=12000 room=2097152",
         "OK BEGIN resume=0", "OK CHUNK 12", "OK COMMIT",
     ])
     deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
@@ -230,7 +230,7 @@ def test_upload_aborts_on_err_and_never_reports_success(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
     serial = FakeSerial([
-        "OK INFO version=2 cards=0 day=0 cap=12000", "OK BEGIN resume=0",
+        "OK INFO version=2 cards=0 day=0 cap=12000 room=2097152", "OK BEGIN resume=0",
         "ERR INVALID", "ERR TRANSACTION", "OK ABORT",
     ])
     with pytest.raises(deck.DeckError, match="device error.*INVALID"):
@@ -241,7 +241,7 @@ def test_upload_aborts_on_err_and_never_reports_success(tmp_path):
 def test_upload_timeout_aborts_and_raises(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
-    serial = FakeSerial(["OK INFO version=2 cards=0 day=0 cap=12000", "OK BEGIN resume=0", ""])
+    serial = FakeSerial(["OK INFO version=2 cards=0 day=0 cap=12000 room=2097152", "OK BEGIN resume=0", ""])
     with pytest.raises(deck.DeckError, match="timeout.*CHUNK"):
         deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial, command_timeout=0.001)
     assert "ABORT" in serial.writes
@@ -251,7 +251,7 @@ def test_upload_rejects_mismatched_ack_instead_of_accepting_it(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
     serial = FakeSerial([
-        "OK INFO version=2 cards=0 day=0 cap=12000", "OK CARD", "OK ABORT",
+        "OK INFO version=2 cards=0 day=0 cap=12000 room=2097152", "OK CARD", "OK ABORT",
     ])
     with pytest.raises(deck.DeckError, match="timeout.*BEGIN"):
         deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial, command_timeout=0.001)
@@ -263,8 +263,30 @@ def test_upload_rejects_mismatched_ack_instead_of_accepting_it(tmp_path):
 def test_upload_rejects_unknown_device_protocol_version(tmp_path):
     path = tmp_path / "cards.tsv"
     path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
-    serial = FakeSerial(["OK INFO version=9 cards=0 day=0 cap=12000"])
+    serial = FakeSerial(["OK INFO version=9 cards=0 day=0 cap=12000 room=2097152"])
     with pytest.raises(deck.DeckError, match="protocol version 9"):
+        deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
+    assert serial.writes == ["INFO"]
+
+
+def test_upload_rejects_deck_larger_than_device_cap(tmp_path):
+    path = tmp_path / "cards.tsv"
+    path.write_text(
+        "id\tdeck\tfront\tback\n1\tD\tQ\tA\n2\tD\tQ2\tA2\n",
+        encoding="utf-8",
+    )
+    serial = FakeSerial(["OK INFO version=2 cards=0 day=0 cap=1 room=2097152"])
+    with pytest.raises(deck.DeckError, match="capacity is 1"):
+        deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
+    assert serial.writes == ["INFO"]
+
+
+def test_upload_rejects_payload_larger_than_device_room(tmp_path):
+    path = tmp_path / "cards.tsv"
+    path.write_text("id\tdeck\tfront\tback\n1\tD\tQ\tA\n", encoding="utf-8")
+    payload = deck.payload_for(deck.load_deck(path))
+    serial = FakeSerial(["OK INFO version=2 cards=0 day=0 cap=12000 room=1"])
+    with pytest.raises(deck.DeckError, match=f"{len(payload)} bytes"):
         deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
     assert serial.writes == ["INFO"]
 
@@ -336,7 +358,7 @@ def test_upload_resumes_from_device_offset(tmp_path):
     payload = deck.payload_for(cards)
     crc = zlib.crc32(payload) & 0xFFFFFFFF
     serial = FakeSerial([
-        "OK INFO version=2 cards=0 day=0 cap=12000",
+        "OK INFO version=2 cards=0 day=0 cap=12000 room=2097152",
         "OK BEGIN resume=0",
         "ERR BUSY",
         f"OK RESUME offset=0 count=1 crc={crc} length={len(payload)}",

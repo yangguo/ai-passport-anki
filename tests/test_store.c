@@ -117,6 +117,7 @@ static void test_ten_thousand_and_heap(void)
     pa_store store;
     pa_store_init(&store, &cards, &sched);
     assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    assert(pa_store_capacity(&store) == PA_STORE_MAX_CARDS);
 
     const uint32_t count = 10000;
     uint8_t *payload = malloc((size_t)count * 16u);
@@ -380,6 +381,69 @@ static void test_revlog_export_roundtrip(void)
            PA_REVLOG_MAX);
 }
 
+static void mount_pair(pa_store *store, ram_flash *cards_ram, pa_flash *cards, ram_flash *sched_ram,
+                       pa_flash *sched, uint32_t cards_size, uint32_t sched_size)
+{
+    make_flash(cards_ram, cards, cards_size);
+    make_flash(sched_ram, sched, sched_size);
+    pa_store_init(store, cards, sched);
+}
+
+static void test_region_plan_and_compact_slot(void)
+{
+    uint32_t cards_bytes = 0;
+    uint32_t sched_bytes = 0;
+    assert(!pa_region_plan(0, &cards_bytes, &sched_bytes));
+    assert(pa_region_plan(PA_CARDS_PARTITION_SIZE + PA_SCHED_PARTITION_SIZE, &cards_bytes, &sched_bytes));
+    assert(cards_bytes == PA_CARDS_PARTITION_SIZE && sched_bytes == PA_SCHED_PARTITION_SIZE);
+    assert(pa_region_plan(PA_CARDS_PARTITION_SIZE + PA_SCHED_PARTITION_SIZE + 4096u, &cards_bytes,
+                          &sched_bytes));
+    assert(cards_bytes == PA_CARDS_PARTITION_SIZE && sched_bytes == PA_SCHED_PARTITION_SIZE);
+
+    assert(pa_region_plan(61440u, &cards_bytes, &sched_bytes));
+    assert(cards_bytes + sched_bytes <= 61440u);
+    assert(pa_store_capacity(NULL) == 0);
+
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    pa_store store;
+    mount_pair(&store, &cards_ram, &cards, &sched_ram, &sched, cards_bytes, sched_bytes);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    uint16_t cap = pa_store_capacity(&store);
+    assert(cap == 256);
+    assert(pa_store_payload_limit(&store) == 4096u);
+    uint32_t resume = 0;
+    assert(!pa_store_import_begin(&store, (uint32_t)cap + 1u, 1, (uint32_t)(cap + 1u) * 11u, &resume));
+    assert(!pa_store_import_begin(&store, 1, 1, pa_store_payload_limit(&store) + 1u, &resume));
+
+    uint8_t payload[64];
+    size_t length = append_card(payload, 0, 3, "D", "Q", "A");
+    assert(import_bytes(&store, payload, 1, (uint32_t)length));
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    pa_store remounted;
+    pa_store_init(&remounted, &cards, &sched);
+    assert(pa_store_mount(&remounted) == PA_STORE_READY);
+    assert(pa_store_count(&remounted) == 1);
+    assert(pa_store_capacity(&remounted) == cap);
+    pa_export_info info;
+    assert(pa_store_export_begin(&remounted, &info));
+    assert(info.revlog_count == 1 && info.dropped == 0);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+
+    mount_pair(&store, &cards_ram, &cards, &sched_ram, &sched, 24576u, 24576u);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    assert(pa_store_capacity(&store) > 0 && pa_store_capacity(&store) < PA_STORE_MAX_CARDS);
+    length = append_card(payload, 0, 4, "D", "Q", "A");
+    assert(import_bytes(&store, payload, 1, (uint32_t)length));
+    assert(pa_store_grade(&store, 0, PA_AGAIN));
+    assert(pa_store_export_begin(&store, &info));
+    assert(info.revlog_count == 0 && info.dropped == 1);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    puts("store: compact region plan PASS");
+}
+
 int main(void)
 {
     test_pack_vector();
@@ -388,5 +452,6 @@ int main(void)
     test_power_loss_and_publish();
     test_ten_thousand_and_heap();
     test_revlog_export_roundtrip();
+    test_region_plan_and_compact_slot();
     return 0;
 }

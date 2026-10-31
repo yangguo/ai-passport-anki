@@ -8,9 +8,10 @@ It covers core scheduling and snapshot validation, UTF-8 page boundaries,
 the bounded USB command parser, and import transaction commit/abort behavior.
 
 The firmware workflow builds with ESP-IDF 5.5.3, reports the IDF size summary,
-checks the 8 MiB partition map and factory app limit, and creates a merged
-factory image. A successful build establishes compile and partition-size
-compatibility only.
+pads the app image for a Cover Arts slot gap, checks the stock 8 MiB
+single-factory map and the 12,000-card factory tail, and creates a merged
+factory image. A successful build establishes compile and layout compatibility
+only. It does not flash a device and does not accept the UI on hardware.
 
 ## Device acceptance
 

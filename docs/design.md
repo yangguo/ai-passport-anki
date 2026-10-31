@@ -50,7 +50,11 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 | GUI | LVGL 9.5.x，esp_lvgl_port 2.9.0 |
 | USB | USB Serial/JTAG 控制台；不启用 UART0，避免 GPIO21 背光冲突 |
 
-8 MiB 分区（`partitions.csv`）在保留原 NVS 起点的前提下为卡片正文和调度留出空间。NVS 仍是 `0x9000/0x40000`（256 KiB），这样已有设备上的 PAK1 `snapshot` 键还能读到并迁移。应用分区保持 64 KiB 对齐，起点仍是 `0x50000`，长度改为 `0x280000`（2.5 MiB）。`0x4A000..0x50000` 的空隙是应用对齐留下的，与旧表相同。
+> **历史分区，不要按此刷写。** 下面这张表是旧的 cards/sched 分区，只作对照。当前 `partitions.csv` 是 stock 单 factory（nvs `0x9000/0x6000`，phy_init `0xf000/0x1000`，factory `0x10000/0x7F0000`），见 [build.md](build.md)。卡片和调度在正在运行的应用分区里、校验过的镜像之后。独立刷写时 factory 尾部仍使用 `0x460000` + `0xD0000` 窗口，最多 12,000 张。Cover Arts 槽只有镜像对齐留下的 60 KiB，结构上限 256 张、每槽 4096 字节正文。不要把 `full.bin` 刷到已安装启动器的设备的 `0x0`。
+
+### 历史分区表（已废弃）
+
+旧表曾把 NVS 留在 `0x9000/0x40000`，应用放在 `0x50000`，再单列 cards 和 sched。这些偏移不再出现在 `partitions.csv` 里。
 
 | 分区 | 偏移 | 大小 | 用途 |
 |---|---:|---:|---|
@@ -60,7 +64,7 @@ AnkiDroid 是 Android/Kotlin 应用，其 Android 页面、WebView、SQLite/Anki
 | cards | 0x2D0000 | 0x460000 | 两份正文槽，每槽 0x230000 |
 | sched | 0x730000 | 0xD0000 | 超级块、导入进度、调度块池 |
 
-表尾是 `0x800000`。这不是其它项目的 app-only 地址；更新必须整表刷写，不能只覆盖旧 factory。cards 子类型 `0x40`，sched 子类型 `0x41`，固件按名字查找。
+旧表尾是 `0x800000`。cards 子类型 `0x40`、sched 子类型 `0x41` 已从分区表删除。固件不再按这两个名字查找分区。
 
 ## 5. 架构与目录
 
@@ -207,7 +211,7 @@ PAK1（magic `PAK1`，version 1，末尾 CRC32）仍是迁移输入。解码失�
 协议 version 2。正文不再一行一张卡，而是规范记录的二进制分块。每块最多 480 字节，hex 后仍低于 1200 字节行长。`zlib.crc32` 与设备 `pa_crc32` 对同一 payload 结果相同。
 
 ```text
-INFO                              -> OK INFO version=2 cards=N day=D cap=12000
+INFO                              -> OK INFO version=2 cards=N day=D cap=C room=R
 BEGIN count crc length            -> OK BEGIN resume=N
 CHUNK offset hex                  -> OK CHUNK accepted
 RESUME                            -> OK RESUME offset=N count=N crc=N length=N
@@ -219,11 +223,11 @@ XCHUNK offset                     -> OK XCHUNK end hex
 XRESUME                           -> OK XRESUME cards=N revlog=N crc=N length=N epoch=N dropped=N now=N offset=N
 ```
 
-`resume` 是已经落盘的偏移；同一进程里若还有未刷出的尾部，RESUME 会把这段也算进去。主机从该偏移继续，不盲目重发旧偏移。BEGIN 在设备重启后可以接上同一 count/crc/length 的进度。块确认丢失时先 RESUME，对不上才 ABORT。COMMIT 在 payload 到齐且 CRC、牌组数、字体都通过后才回答 OK。解析器仍接受旧的 CARD 行，固件和模拟器不把它当作导入路径。
+`resume` 是已经落盘的偏移；同一进程里若还有未刷出的尾部，RESUME 会把这段也算进去。主机从该偏移继续，不盲目重发旧偏移。BEGIN 在设备重启后可以接上同一 count/crc/length 的进度。块确认丢失时先 RESUME，对不上才 ABORT。COMMIT 在 payload 到齐且 CRC、牌组数、字体都通过后才回答 OK。解析器仍接受旧的 CARD 行，固件和模拟器不把它当作导入路径。`cap` 是这次挂载的张数上限：独立尾部为 12000，Cover Arts 槽更小。`room` 是这次挂载的正文字节上限（`pa_store_payload_limit`）。主机在 `BEGIN` 之前拒绝超过 `cap` 的牌组，也拒绝字节数超过 `room` 的 payload。
 
 错误仍是 `ERR <code>`。COMMIT 失败不能回 OK。再次 BEGIN 在事务未结束时拒绝。60 秒无输入自动 ABORT。长按 OK 可中止。队列仍是 4 条，忙则 `ERR BUSY`。工具逐条等 ACK，不把启动日志当成 ACK。
 
-`EXPORT` 开始一次只读快照。镜像 magic `PREV`，头 32 字节（version u16=1，头长 32，epoch、now、卡片数、调度记录长 20、复习条数、dropped、flags=0），后面按卡片下标排列 20 字节调度记录，再接 8 字节复习记录。CRC 是整幅镜像的 zlib/IEEE，写在 OK 行上，不放进镜像。满载大约 32 + 12000×20 + 24384×8 字节，设备按块现算 CRC，不把镜像放进 RAM。`XCHUNK` 的块最大 480 字节，hex 行仍低于 1200 字节，偏移可以不连续。主机超时后发 `XRESUME`，核对 crc、length、epoch、revlog，再从自己已经拼好的长度继续，不跳过没读到的字节。没有会话时 `XCHUNK` 返回 `ERR RANGE`，`XRESUME` 返回 `ERR TRANSACTION`。导入进行中 `EXPORT` 返回 `ERR TRANSACTION`。协议版本仍是 2，`INFO` 行不变；旧固件会拒绝这些新命令。
+`EXPORT` 开始一次只读快照。镜像 magic `PREV`，头 32 字节（version u16=1，头长 32，epoch、now、卡片数、调度记录长 20、复习条数、dropped、flags=0），后面按卡片下标排列 20 字节调度记录，再接 8 字节复习记录。CRC 是整幅镜像的 zlib/IEEE，写在 OK 行上，不放进镜像。满载大约 32 + 12000×20 + 24384×8 字节，设备按块现算 CRC，不把镜像放进 RAM。`XCHUNK` 的块最大 480 字节，hex 行仍低于 1200 字节，偏移可以不连续。主机超时后发 `XRESUME`，核对 crc、length、epoch、revlog，再从自己已经拼好的长度继续，不跳过没读到的字节。没有会话时 `XCHUNK` 返回 `ERR RANGE`，`XRESUME` 返回 `ERR TRANSACTION`。导入进行中 `EXPORT` 返回 `ERR TRANSACTION`。协议版本仍是 2。`INFO` 在 `cap` 后带 `room`（正文字节上限）。旧固件没有 `room`，当前主机把它当成无法识别的 INFO。
 
 导入脚本：`inspect input.tsv` 验证并统计；`commands input.tsv --output deck.commands` 离线导出；`upload input.tsv --port /dev/cu.usbmodem...`（pyserial可选依赖）串行执行，校验所有ACK，只有 OK COMMIT 才报告成功。超时/ERR报告失败，尝试ABORT。先INFO检查协议版本。`anki-decks`、`anki-pull`、`sync-back` 见 [user-guide.md](user-guide.md)。回写只用映射里的设备 id 和复习档位调用 AnkiConnect `answerCards`，不把设备算出的 interval 写进 Anki。
 
@@ -239,7 +243,7 @@ XRESUME                           -> OK XRESUME cards=N revlog=N crc=N length=N 
 | app task | 16 KiB 栈。挂载和读块用 `pa_store` 里的扇区缓冲，不在栈上再放 4 KiB |
 | LVGL | pool 24 KiB，显示缓冲沿用 BSP |
 | 字体 | flash const。假名和圈号大约增加几百个字形 |
-| app flash | 必须小于 factory `0x280000`；CI 检查 |
+| app flash | 必须能放进 factory，并在镜像后留下 `0x530000` 的 12,000 张窗口；CI 检查。旧的 `0x280000` factory 已废弃 |
 | 选卡 | 按调度块扫描，块数最多 60，不随卡数把对象放进 RAM |
 | 响应 | 目标短按到画面 <150ms；需真机测量，不能用编译 PASS 代替 |
 

@@ -31,6 +31,7 @@ MAX_LINE_BYTES = 1200
 MAX_CHUNK_BYTES = 20
 UINT32_MAX = 0xFFFFFFFF
 PROTOCOL_VERSION = 2
+_INFO_REPLY = re.compile(r"OK INFO version=(\d+) cards=(\d+) day=(\d+) cap=(\d+) room=(\d+)")
 APKG_DB_MAX_BYTES = 16 * 1024 * 1024
 APKG_DECOMPRESSED_MAX_BYTES = 64 * 1024 * 1024
 FONT_MANIFEST = Path(__file__).resolve().parents[1] / "assets/fonts/pa_font_16.manifest.json"
@@ -561,7 +562,7 @@ def _read_reply(serial_port, command: str, expected: str, timeout: float) -> str
         if reply.startswith("ERR "):
             raise DeckError(f"device error to {shown}: {reply[4:]}")
         if expected == "INFO":
-            match = re.fullmatch(r"OK INFO version=(\d+) cards=(\d+) day=(\d+) cap=(\d+)", reply)
+            match = _INFO_REPLY.fullmatch(reply)
             if match:
                 if int(match.group(1)) != PROTOCOL_VERSION:
                     raise DeckError(f"device protocol version {match.group(1)} is unsupported")
@@ -610,7 +611,18 @@ def upload(filename: str | Path, port: str, *, day: int | None = None,
     serial_port = factory(port, baudrate, command_timeout) if serial_factory is None else factory(port, baudrate=baudrate, timeout=max(command_timeout, commit_timeout))
     transaction_started = False
     try:
-        _exchange(serial_port, "INFO", "INFO", command_timeout)
+        info = _exchange(serial_port, "INFO", "INFO", command_timeout)
+        info_match = _INFO_REPLY.fullmatch(info)
+        if info_match is None:
+            raise DeckError(f"unrecognized info reply: {info}")
+        device_cap = int(info_match.group(4))
+        device_room = int(info_match.group(5))
+        if len(cards) > device_cap:
+            raise DeckError(f"deck has {len(cards)} cards; device capacity is {device_cap}")
+        if len(payload) > device_room:
+            raise DeckError(
+                f"deck payload is {len(payload)} bytes; device payload limit is {device_room} bytes"
+            )
         if day is not None:
             if not isinstance(day, int) or isinstance(day, bool) or not 0 <= day <= UINT32_MAX // 1440:
                 raise DeckError("day must be in range 0..2982616")

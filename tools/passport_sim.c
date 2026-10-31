@@ -355,8 +355,9 @@ static void handle_import(const pa_protocol_command *command)
 {
     switch (command->kind) {
     case PA_PROTOCOL_INFO:
-        printf("OK INFO version=%u cards=%u day=%" PRIu32 " cap=%u\n", PA_PROTOCOL_VERSION,
-               pa_store_count(&store), pa_store_now(&store) / 1440u, PA_STORE_MAX_CARDS);
+        printf("OK INFO version=%u cards=%u day=%" PRIu32 " cap=%u room=%" PRIu32 "\n",
+               PA_PROTOCOL_VERSION, pa_store_count(&store), pa_store_now(&store) / 1440u,
+               pa_store_capacity(&store), pa_store_payload_limit(&store));
         fflush(stdout);
         break;
     case PA_PROTOCOL_BEGIN: {

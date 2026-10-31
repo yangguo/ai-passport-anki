@@ -311,7 +311,7 @@ def test_sync_back_is_idempotent_and_dry_run_does_not_answer(tmp_path, anki_serv
     map_path = tmp_path / "study.map.json"
     _map(map_path)
     plan = [
-        ["OK INFO version=2 cards=1 day=0 cap=12000"],
+        ["OK INFO version=2 cards=1 day=0 cap=12000 room=2097152"],
         [meta],
         [chunk],
     ]
@@ -360,7 +360,7 @@ def test_sync_back_resumes_chunks_and_does_not_repeat_a_crashed_answer(tmp_path,
     _map(map_path)
     receipt = tmp_path / "study.receipt.json"
     serial = ScriptedSerial([
-        ["OK INFO version=2 cards=1 day=0 cap=12000"],
+        ["OK INFO version=2 cards=1 day=0 cap=12000 room=2097152"],
         [meta],
         [None],
         [resume],
@@ -379,7 +379,7 @@ def test_sync_back_resumes_chunks_and_does_not_repeat_a_crashed_answer(tmp_path,
     assert saved["pending"]["ease"] == 2
 
     serial = ScriptedSerial([
-        ["OK INFO version=2 cards=1 day=0 cap=12000"],
+        ["OK INFO version=2 cards=1 day=0 cap=12000 room=2097152"],
         [meta],
         [chunk],
     ])
@@ -411,7 +411,7 @@ def test_sync_back_skips_cards_modified_in_anki_after_pull(tmp_path, anki_server
     map_path = tmp_path / "study.map.json"
     _map(map_path, imported_at_ms=1_700_000_000_000)
     serial = ScriptedSerial([
-        ["OK INFO version=2 cards=1 day=0 cap=12000"],
+        ["OK INFO version=2 cards=1 day=0 cap=12000 room=2097152"],
         [meta],
         [chunk],
     ])

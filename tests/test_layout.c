@@ -35,5 +35,22 @@ int main(void) {
     assert(pa_layout_pages(invalid, sizeof(invalid), 8, 2, width, NULL, pages) == 0);
     const char missing[] = "A\xf0\x9f\x99\x82";
     assert(pa_layout_pages(missing, sizeof(missing) - 1, 8, 2, width, NULL, pages) == 0);
+
+    char long_field[PA_STUDY_TEXT_WIDTH * PA_STUDY_TEXT_LINES * 3 + 1];
+    memset(long_field, 'a', sizeof(long_field) - 1);
+    long_field[sizeof(long_field) - 1] = '\0';
+    count = pa_layout_pages(long_field, strlen(long_field), PA_STUDY_TEXT_WIDTH,
+                            PA_STUDY_TEXT_LINES, width, NULL, pages);
+    assert(count >= 2 && count <= PA_LAYOUT_MAX_PAGES);
+    for (size_t i = 0; i < count; ++i) {
+        char page[PA_STUDY_TEXT_WIDTH * PA_STUDY_TEXT_LINES + PA_STUDY_TEXT_LINES + 1];
+        unsigned lines = 1;
+        assert(pa_layout_format_page(long_field, strlen(long_field), pages[i], PA_STUDY_TEXT_WIDTH,
+                                     width, NULL, page, sizeof(page)));
+        for (char *p = page; *p; ++p) {
+            if (*p == '\n') ++lines;
+        }
+        assert(lines <= PA_STUDY_TEXT_LINES);
+    }
     return 0;
 }

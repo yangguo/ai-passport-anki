@@ -3,19 +3,24 @@
 #include "bsp_display.h"
 #include "bsp_power.h"
 #include "bsp_pins.h"
+#include "esp_image_format.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "launcher_contract.h"
 #include "lvgl.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "pa_cover.h"
 #include "pa_layout.h"
 #include "pa_protocol.h"
 #include "pa_store.h"
+#include "pa_tail.h"
 #include "passport_anki.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -43,6 +48,9 @@ static uint32_t glyph_checks;
 
 typedef enum { UI_DECKS, UI_QUESTION, UI_ANSWER, UI_RATING, UI_EMPTY,
                UI_CONFIRM_DAY, UI_IMPORTING, UI_ERROR } ui_state;
+_Static_assert((int)UI_DECKS == PA_COVER_UI_DECKS, "deck list is the cover gate");
+_Static_assert((int)BSP_BTN_UP == PA_COVER_BTN_UP, "cover gate uses UP");
+_Static_assert((int)BSP_BTN_LONG == PA_COVER_BTN_LONG, "cover gate uses long press");
 typedef enum { EVENT_BUTTON, EVENT_LINE, EVENT_TICK } event_type;
 typedef struct {
     event_type type;
@@ -62,14 +70,16 @@ static lv_obj_t *title_label, *body_label, *footer_label;
 
 static bool part_read(void *ctx, uint32_t offset, void *dst, uint32_t length)
 {
-    return esp_partition_read(ctx, offset, dst, length) == ESP_OK;
+    const esp_partition_t *part = ctx;
+    return esp_partition_read(part, offset, dst, length) == ESP_OK;
 }
 
 static bool part_write(void *ctx, uint32_t offset, const void *src, uint32_t length)
 {
+    const esp_partition_t *part = ctx;
     uint8_t tail[16];
     uint32_t aligned = length & ~15u;
-    if (aligned != 0 && esp_partition_write(ctx, offset, src, aligned) != ESP_OK) {
+    if (aligned != 0 && esp_partition_write(part, offset, src, aligned) != ESP_OK) {
         return false;
     }
     uint32_t rest = length - aligned;
@@ -78,7 +88,7 @@ static bool part_write(void *ctx, uint32_t offset, const void *src, uint32_t len
     }
     memset(tail, 0xff, sizeof(tail));
     memcpy(tail, (const uint8_t *)src + aligned, rest);
-    return esp_partition_write(ctx, offset + aligned, tail, sizeof(tail)) == ESP_OK;
+    return esp_partition_write(part, offset + aligned, tail, sizeof(tail)) == ESP_OK;
 }
 
 static bool part_erase(void *ctx, uint32_t offset, uint32_t length)
@@ -86,13 +96,90 @@ static bool part_erase(void *ctx, uint32_t offset, uint32_t length)
     return esp_partition_erase_range(ctx, offset, length) == ESP_OK;
 }
 
-static bool open_partition(pa_flash *flash, const char *name, uint32_t expected)
+typedef struct {
+    const esp_partition_t *part;
+    uint32_t base;
+} pa_part_win;
+
+static pa_part_win cards_win;
+static pa_part_win sched_win;
+
+static bool win_read(void *ctx, uint32_t offset, void *dst, uint32_t length)
 {
-    const esp_partition_t *part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, name);
-    if (part == NULL || part->size != expected) {
+    pa_part_win *win = ctx;
+    return part_read((void *)win->part, win->base + offset, dst, length);
+}
+
+static bool win_write(void *ctx, uint32_t offset, const void *src, uint32_t length)
+{
+    pa_part_win *win = ctx;
+    return part_write((void *)win->part, win->base + offset, src, length);
+}
+
+static bool win_erase(void *ctx, uint32_t offset, uint32_t length)
+{
+    pa_part_win *win = ctx;
+    return part_erase((void *)win->part, win->base + offset, length);
+}
+
+static bool sidecar_magic(const esp_partition_t *part, uint32_t offset)
+{
+    char magic[4];
+    if (offset > part->size || 4u > part->size - offset) {
         return false;
     }
-    *flash = (pa_flash){.ctx = (void *)part, .size = part->size, .read = part_read, .write = part_write, .erase = part_erase};
+    return esp_partition_read(part, offset, magic, sizeof(magic)) == ESP_OK &&
+           memcmp(magic, "DPS1", 4) == 0;
+}
+
+static bool running_is_factory(const esp_partition_t *part)
+{
+    return part->type == ESP_PARTITION_TYPE_APP &&
+           part->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY &&
+           strcmp(part->label, "factory") == 0;
+}
+
+/* Card bytes follow the verified image. Recognized slot size or a DPS1
+ * sidecar keeps the last 64 KiB. Only factory may use the rest of the
+ * partition. Any other size is refused so an import cannot erase a sidecar
+ * or the gap. Addresses are not logged. */
+static bool open_tail_storage(void)
+{
+    const esp_partition_t *part = esp_ota_get_running_partition();
+    esp_partition_pos_t pos;
+    esp_image_metadata_t meta;
+    uint32_t image_len, data_start, data_end, data_size, cards_bytes, sched_bytes;
+    uint32_t bank_a, bank_b;
+    bool sidecar = false;
+    if (part == NULL) {
+        return false;
+    }
+    pos.offset = part->address;
+    pos.size = part->size;
+    if (esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) != ESP_OK || meta.image_len == 0 ||
+        meta.image_len > part->size) {
+        return false;
+    }
+    image_len = meta.image_len;
+    if (pa_tail_sidecar_banks(part->size, image_len, &bank_a, &bank_b)) {
+        sidecar = sidecar_magic(part, bank_a) || sidecar_magic(part, bank_b);
+    }
+    if (!pa_tail_data_end(part->size, image_len, running_is_factory(part), sidecar, &data_start,
+                          &data_end)) {
+        ESP_LOGE(TAG, "card storage refused; partition is not a slot, DPS1 sidecar, or factory");
+        return false;
+    }
+    data_size = data_end - data_start;
+    if (!pa_region_plan(data_size, &cards_bytes, &sched_bytes) ||
+        cards_bytes > data_size || sched_bytes > data_size - cards_bytes) {
+        return false;
+    }
+    cards_win = (pa_part_win){.part = part, .base = data_start};
+    sched_win = (pa_part_win){.part = part, .base = data_start + cards_bytes};
+    cards_flash = (pa_flash){.ctx = &cards_win, .size = cards_bytes,
+                             .read = win_read, .write = win_write, .erase = win_erase};
+    sched_flash = (pa_flash){.ctx = &sched_win, .size = sched_bytes,
+                             .read = win_read, .write = win_write, .erase = win_erase};
     return true;
 }
 
@@ -105,7 +192,8 @@ static uint16_t glyph_width(uint32_t cp, void *user) {
 
 static bool text_fits(const char *text) {
     pa_text_page pages[PA_LAYOUT_MAX_PAGES];
-    return pa_layout_pages(text, strlen(text), BSP_LCD_W - 36, 4, glyph_width, NULL, pages) != 0;
+    return pa_layout_pages(text, strlen(text), PA_STUDY_TEXT_WIDTH, PA_STUDY_TEXT_LINES,
+                           glyph_width, NULL, pages) != 0;
 }
 
 static bool text_supported(const char *deck, const char *front, const char *back, void *user) {
@@ -117,7 +205,8 @@ static bool text_supported(const char *deck, const char *front, const char *back
 }
 
 static size_t pages_for(const char *text, pa_text_page pages[PA_LAYOUT_MAX_PAGES]) {
-    return pa_layout_pages(text, strlen(text), BSP_LCD_W - 36, 4, glyph_width, NULL, pages);
+    return pa_layout_pages(text, strlen(text), PA_STUDY_TEXT_WIDTH, PA_STUDY_TEXT_LINES,
+                           glyph_width, NULL, pages);
 }
 
 static uint16_t deck_count(void) { return pa_store_deck_count(&store); }
@@ -133,9 +222,25 @@ static void clamp_deck_index(void) {
     }
 }
 
-static const char *rating_name(pa_rating rating) {
+static uint32_t grade_color(pa_rating rating) {
+    static const uint32_t colors[] = {0xE05A5A, 0xE0A15A, 0x5EBE7A, 0x6AA6FF};
+    return rating <= PA_EASY ? colors[rating] : colors[PA_GOOD];
+}
+
+static void format_grades(char *dst, size_t cap, pa_rating selected) {
     static const char *names[] = {"Again", "Hard", "Good", "Easy"};
-    return rating <= PA_EASY ? names[rating] : "Good";
+    size_t used = 0;
+    dst[0] = '\0';
+    for (int i = 0; i < 4; ++i) {
+        int wrote = snprintf(dst + used, cap - used, "%s%s%s%s", used ? " " : "",
+                             (pa_rating)i == selected ? "[" : "", names[i],
+                             (pa_rating)i == selected ? "]" : "");
+        if (wrote < 0 || (size_t)wrote >= cap - used) {
+            dst[cap - 1] = '\0';
+            return;
+        }
+        used += (size_t)wrote;
+    }
 }
 
 static bool load_current_card(void) {
@@ -147,68 +252,87 @@ static void render(void) {
     if (!title_label || !body_label || !footer_label || !bsp_lvgl_lock(100)) return;
     char title[96], body[PA_LINE_MAX + 1], footer[160];
     uint32_t day = pa_store_now(&store) / 1440U;
-    snprintf(title, sizeof(title), "Anki  学习日 %" PRIu32, day);
+    uint32_t title_color = 0x8B95A1;
+    uint32_t body_color = 0xF4F1EA;
+    uint32_t footer_color = 0x9AA3AD;
+    bool body_wrap = true;
+    snprintf(title, sizeof(title), "Anki");
     body[0] = '\0';
-    snprintf(footer, sizeof(footer), "UP/DOWN 选择   OK 确认");
+    footer[0] = '\0';
     uint16_t count = deck_count();
     if (ui == UI_DECKS) {
         if (count == 0) {
-            snprintf(body, sizeof(body), "还没有牌组\n通过 USB 导入 TSV\n\n学习日：%" PRIu32, day);
-            snprintf(footer, sizeof(footer), "OK可推进学习日；长按返回");
+            snprintf(body, sizeof(body), "还没有牌组\n通过 USB 导入 TSV\n\n学习日 %" PRIu32, day);
+            snprintf(footer, sizeof(footer), "OK 推进学习日");
         } else if (deck_index == count) {
-            snprintf(body, sizeof(body), "推进到下一学习日？\n\n当前学习日：%" PRIu32, day);
-            snprintf(footer, sizeof(footer), "UP/DOWN选择   OK确认推进");
+            snprintf(body, sizeof(body), "推进到下一学习日？\n\n当前学习日 %" PRIu32, day);
+            snprintf(footer, sizeof(footer), "OK 确认推进");
         } else {
-            snprintf(body, sizeof(body), "%s\n牌组 %u/%u\nOK 开始复习",
-                     deck_selected() ? deck_selected() : "还没有牌组", deck_index + 1, count);
+            snprintf(body, sizeof(body), "%s\n%u / %u\n学习日 %" PRIu32,
+                     deck_selected() ? deck_selected() : "还没有牌组", deck_index + 1, count, day);
+            snprintf(footer, sizeof(footer), "OK 开始");
         }
     } else if (ui == UI_QUESTION || ui == UI_ANSWER || ui == UI_RATING) {
         const char *text = ui == UI_QUESTION ? card_front : card_back;
         pa_text_page pages[PA_LAYOUT_MAX_PAGES];
         size_t pages_count = pages_for(text, pages);
         uint16_t page = ui == UI_QUESTION ? question_page : answer_page;
+        body_wrap = false;
         if (!pages_count) {
             snprintf(title, sizeof(title), "字体缺字");
             snprintf(body, sizeof(body), "这张卡含有当前字体不支持的文字。需重新导入受支持的牌组。");
             snprintf(footer, sizeof(footer), "长按 OK 返回");
+            body_wrap = true;
             goto draw_labels;
         }
         if (page >= pages_count) page = 0;
-        if (!pa_layout_format_page(text, strlen(text), pages[page], BSP_LCD_W - 36,
+        if (!pa_layout_format_page(text, strlen(text), pages[page], PA_STUDY_TEXT_WIDTH,
                                    glyph_width, NULL, body, sizeof(body))) {
             snprintf(title, sizeof(title), "字体缺字");
             snprintf(body, sizeof(body), "这张卡含有当前字体不支持的文字。需重新导入受支持的牌组。");
             snprintf(footer, sizeof(footer), "长按 OK 返回");
+            body_wrap = true;
             goto draw_labels;
         }
         snprintf(title, sizeof(title), "%s", card_deck);
-        if (ui == UI_QUESTION) snprintf(footer, sizeof(footer), "D%" PRIu32 " C%u/%u Q%u/%u UP/DOWN 翻面OK",
-                                        day, session.current + 1, pa_store_count(&store),
-                                        page + 1, (unsigned)pages_count);
-        else if (ui == UI_ANSWER) snprintf(footer, sizeof(footer), "D%" PRIu32 " C%u/%u A%u/%u UP/DOWN 评分OK",
-                                          day, session.current + 1, pa_store_count(&store),
-                                          page + 1, (unsigned)pages_count);
-        else if (grade_save_failed) snprintf(footer, sizeof(footer), "存档失败；OK重试  长按返回");
-        else snprintf(footer, sizeof(footer), "%s  D%" PRIu32 " C%u/%u UP/DOWN 保存OK",
-                      rating_name(selected_rating), day, session.current + 1, pa_store_count(&store));
+        if (ui == UI_QUESTION) {
+            snprintf(footer, sizeof(footer), "%u/%u  OK 翻面", page + 1, (unsigned)pages_count);
+        } else if (ui == UI_ANSWER) {
+            body_color = 0xE7F0FA;
+            snprintf(footer, sizeof(footer), "%u/%u  OK 评分", page + 1, (unsigned)pages_count);
+        } else if (grade_save_failed) {
+            body_color = 0xE7F0FA;
+            footer_color = 0xE05A5A;
+            snprintf(footer, sizeof(footer), "保存失败  OK 重试");
+        } else {
+            body_color = 0xE7F0FA;
+            footer_color = grade_color(selected_rating);
+            format_grades(footer, sizeof(footer), selected_rating);
+        }
     } else if (ui == UI_EMPTY) {
         snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n可推进学习日。",
                  deck_selected() ? deck_selected() : "全部");
-        snprintf(footer, sizeof(footer), "OK重新检查   长按返回牌组");
+        snprintf(footer, sizeof(footer), "OK 重新检查");
     } else if (ui == UI_CONFIRM_DAY) {
         snprintf(body, sizeof(body), "推进学习日 +1？\n\n当前选择：%s\n设备时间保持不变。",
                  confirming_day ? "确认" : "取消");
-        snprintf(footer, sizeof(footer), "UP/DOWN选择  OK执行  长按返回");
+        snprintf(footer, sizeof(footer), "OK 执行");
     } else if (ui == UI_IMPORTING) {
         snprintf(body, sizeof(body), "正在导入牌组\n已接收 %" PRIu32 " / %" PRIu32 " 字节\n长按 OK 可取消。",
                  store.import_durable + store.import_asm, store.import_length);
         snprintf(footer, sizeof(footer), "请保持 USB 连接");
     } else {
         snprintf(body, sizeof(body), "存档或设备错误\n%s\n长按 OK 返回。", last_error);
-        snprintf(footer, sizeof(footer), storage_corrupt ? "需显式导入新牌组" :
-                 (!storage_ready ? "卡片分区不可用；未擦除 NVS" : ""));
+        snprintf(footer, sizeof(footer), storage_corrupt ? "需重新导入牌组" :
+                 (!storage_ready ? "卡片空间不可用" : ""));
     }
 draw_labels:
+    lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(body_label, body_wrap ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(footer_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(title_color), 0);
+    lv_obj_set_style_text_color(body_label, lv_color_hex(body_color), 0);
+    lv_obj_set_style_text_color(footer_label, lv_color_hex(footer_color), 0);
     lv_label_set_text(title_label, title);
     lv_label_set_text(body_label, body);
     lv_label_set_text(footer_label, footer);
@@ -235,8 +359,9 @@ static void handle_line(char *line) {
     if (!pa_protocol_parse(line, strlen(line), &command)) { reply_error("COMMAND"); return; }
     switch (command.kind) {
     case PA_PROTOCOL_INFO:
-        printf("OK INFO version=%u cards=%u day=%" PRIu32 " cap=%u\n", PA_PROTOCOL_VERSION,
-               pa_store_count(&store), pa_store_now(&store) / 1440U, PA_STORE_MAX_CARDS);
+        printf("OK INFO version=%u cards=%u day=%" PRIu32 " cap=%u room=%" PRIu32 "\n",
+               PA_PROTOCOL_VERSION, pa_store_count(&store), pa_store_now(&store) / 1440U,
+               pa_store_capacity(&store), pa_store_payload_limit(&store));
         fflush(stdout);
         return;
     case PA_PROTOCOL_BEGIN: {
@@ -461,7 +586,17 @@ static void app_task(void *arg) {
     event_t event;
     for (;;) {
         if (xQueueReceive(events, &event, portMAX_DELAY) != pdTRUE) continue;
-        if (event.type == EVENT_BUTTON) process_button(&event);
+        if (event.type == EVENT_BUTTON) {
+            if (pa_cover_requests_launcher((int)ui, (int)event.button, (int)event.button_event)) {
+                if (storage_ready && !storage_corrupt && !store.import_active) {
+                    (void)pa_store_checkpoint(&store);
+                }
+                esp_err_t cover_err = launcher_contract_return_to_factory();
+                ESP_LOGW(TAG, "stay in play; launcher return failed (%s)", esp_err_to_name(cover_err));
+            } else {
+                process_button(&event);
+            }
+        }
         else if (event.type == EVENT_LINE) {
             handle_line(event.line);
             if (ui != UI_ERROR && ui != UI_IMPORTING) render();
@@ -513,8 +648,7 @@ void app_main(void) {
     if (!nvs_ready) {
         ESP_LOGE(TAG, "NVS init failed; flash was not erased");
     }
-    storage_ready = open_partition(&cards_flash, "cards", PA_CARDS_PARTITION_SIZE) &&
-                    open_partition(&sched_flash, "sched", PA_SCHED_PARTITION_SIZE);
+    storage_ready = open_tail_storage();
     if (storage_ready) {
         pa_store_init(&store, &cards_flash, &sched_flash);
         pa_store_status status = pa_store_mount(&store);
@@ -525,7 +659,7 @@ void app_main(void) {
         storage_corrupt = status == PA_STORE_CORRUPT;
         if (storage_corrupt) last_error = "存档损坏或无法读取";
     } else {
-        last_error = "卡片分区不可用；未擦除任何数据";
+        last_error = "卡片空间不可用；未擦除任何数据";
     }
     clamp_deck_index();
     ESP_LOGI(TAG, "free heap %" PRIu32 " bytes; pa_store %u bytes; cards %u",
@@ -539,21 +673,32 @@ void app_main(void) {
     }
     {
         lv_obj_t *screen = lv_screen_active();
-        lv_obj_set_style_bg_color(screen, lv_color_hex(0x101820), 0);
-        title_label = lv_label_create(screen); lv_obj_set_pos(title_label, 18, 30); lv_obj_set_size(title_label, 204, 62);
-        lv_label_set_long_mode(title_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_bg_color(screen, lv_color_hex(0x12161C), 0);
+        lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+        title_label = lv_label_create(screen);
+        lv_obj_set_pos(title_label, 18, 30);
+        lv_obj_set_size(title_label, PA_STUDY_TEXT_WIDTH, 31);
+        lv_obj_set_style_pad_all(title_label, 0, 0);
+        lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_line_space(title_label, 0, 0);
         lv_obj_set_style_text_font(title_label, &pa_font_16, 0);
-        lv_obj_set_style_text_color(title_label, lv_color_hex(0xf3f4f6), 0);
-        body_label = lv_label_create(screen); lv_obj_set_pos(body_label, 18, 96); lv_obj_set_size(body_label, 204, 124);
-        lv_label_set_long_mode(body_label, LV_LABEL_LONG_CLIP); lv_obj_set_style_text_font(body_label, &pa_font_16, 0);
+        lv_obj_set_style_text_color(title_label, lv_color_hex(0x8B95A1), 0);
+        body_label = lv_label_create(screen);
+        lv_obj_set_pos(body_label, 18, 64);
+        lv_obj_set_size(body_label, PA_STUDY_TEXT_WIDTH, PA_STUDY_TEXT_LINES * 31);
+        lv_obj_set_style_pad_all(body_label, 0, 0);
+        lv_label_set_long_mode(body_label, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_font(body_label, &pa_font_16, 0);
         lv_obj_set_style_text_line_space(body_label, 0, 0);
-        lv_obj_set_style_text_color(body_label, lv_color_hex(0xf3f4f6), 0);
-        footer_label = lv_label_create(screen); lv_obj_set_pos(footer_label, 18, 224); lv_obj_set_size(footer_label, 204, 62);
-        lv_label_set_long_mode(footer_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_color(body_label, lv_color_hex(0xF4F1EA), 0);
+        footer_label = lv_label_create(screen);
+        lv_obj_set_pos(footer_label, 18, 64 + PA_STUDY_TEXT_LINES * 31 + 3);
+        lv_obj_set_size(footer_label, PA_STUDY_TEXT_WIDTH, 31);
+        lv_obj_set_style_pad_all(footer_label, 0, 0);
+        lv_label_set_long_mode(footer_label, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_line_space(footer_label, 0, 0);
         lv_obj_set_style_text_font(footer_label, &pa_font_16, 0);
-        lv_obj_set_style_text_color(footer_label, lv_color_hex(0xf3f4f6), 0);
+        lv_obj_set_style_text_color(footer_label, lv_color_hex(0x9AA3AD), 0);
         bsp_lvgl_unlock();
     }
     bsp_display_backlight(70);

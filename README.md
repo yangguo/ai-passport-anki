@@ -10,7 +10,7 @@ FoloToy AI Passport 离线文字闪卡复习器：牌组选择 → 翻面 → Ag
 
 - 最多 12,000 张、多牌组、中英日纯文本；每面最多 511 UTF-8 字节。
 - 四档评分与 1 分钟/10 分钟学习步骤；简化间隔复习调度。
-- 正文和调度放在独立 flash 分区，按块读写并带 CRC；旧的 64 张 PAK1 快照可以迁入。
+- 正文和调度写在当前应用镜像之后的尾部，按块读写并带 CRC。独立刷写时仍是最多 12,000 张；Cover Arts 槽只有约 60 KiB，见[构建说明](docs/build.md)。旧的 64 张 PAK1 快照在放得进 NVS 时可以迁入。
 - 电脑 UTF-8 TSV 导入；旧式 Basic APKG，以及 JLPT 字段牌组（假名展开、丢弃音频图片）。
 - 三键分页、学习日推进；字体覆盖清单中的 21,957 个码点，缺字明确拒绝。
 
@@ -34,7 +34,7 @@ cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON
 cmake --build build/host
 ctest --test-dir build/host --output-on-failure
 python3 -m pip install -r requirements-dev.txt
-python3 -m pytest tests/test_deck.py tests/test_anki_sync.py tests/test_simulator.py -q
+python3 -m pytest tests/test_deck.py tests/test_anki_sync.py tests/test_simulator.py tests/test_image_pad.py -q
 ```
 
 ## 桌面学习模拟器
@@ -52,7 +52,7 @@ python3 -m pytest tests/test_deck.py tests/test_anki_sync.py tests/test_simulato
 bash tools/validate_firmware.sh
 ```
 
-ESP-IDF锁5.5.3，LVGL锁9.5系列；构建产物位于 `build/artifacts/`，包含app、bootloader、partition-table和完整factory镜像。也可查看 [GitHub Actions](https://github.com/yangguo/ai-passport-anki/actions) 构建并下载产物。
+ESP-IDF锁5.5.3，LVGL锁9.5系列；构建产物位于 `build/artifacts/`。Cover Arts 安装 `app.bin`。`full.bin` 只用于准备整机覆盖的设备，不要刷到已经有启动器的 `0x0`。也可查看 [GitHub Actions](https://github.com/yangguo/ai-passport-anki/actions) 构建并下载产物。
 
 [构建/刷写说明](docs/build.md)、[项目状态](docs/status.md)、[验收证据](docs/acceptance.md)。真机验收单独记录；本次开发未刷写设备。
 
