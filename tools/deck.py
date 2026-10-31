@@ -339,6 +339,12 @@ def _table_names(connection: sqlite3.Connection) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
+def _leaf_deck_name(name: str) -> str:
+    """Schema-18 decks nest with \x1F separators (older exports use ::); the device is flat."""
+    leaf = name.replace("\x1f", "::").split("::")[-1]
+    return leaf.strip()
+
+
 def _selected_cards(connection: sqlite3.Connection, only_decks: set[str] | None, *, schema18: bool) -> list[Card]:
     try:
         if schema18:
@@ -370,6 +376,7 @@ def _selected_cards(connection: sqlite3.Connection, only_decks: set[str] | None,
             deck_name = decks.get(int(row["did"]))
             if deck_name is None:
                 raise DeckError(f"card {row['cid']} references a missing deck")
+            deck_name = _leaf_deck_name(deck_name)
             if only_decks is not None and deck_name not in only_decks:
                 continue
             note_id = int(row["nid"])

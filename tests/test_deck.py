@@ -316,7 +316,7 @@ def test_jlpt_model_strips_media_and_expands_furigana(tmp_path):
     card = deck.load_deck(path)[0]
     assert card.id == 1
     assert card.anki_id == "99"
-    assert card.deck == "JLPT::N5::1-高频"
+    assert card.deck == "1-高频"
     assert card.front == "漢字\n漢（かん）字（じ）"
     assert "简体定义" in card.back
     assert "例（れい）文" in card.back
@@ -359,3 +359,27 @@ def test_font_manifest_records_actual_requested_range_coverage():
     assert covers(0x3042) and covers(0x30A2) and covers(0x30F6)
     assert covers(0x2460) and covers(0x2473) and covers(0x24EA)
     assert covers(0x03B1) and covers(0x2026)
+
+
+def test_apkg_nested_deck_names_use_leaf(tmp_path):
+    db_path = tmp_path / "nested-collection.sqlite"
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TABLE notetypes (id INTEGER PRIMARY KEY, name TEXT)")
+    db.execute("CREATE TABLE fields (ntid INTEGER, ord INTEGER, name TEXT)")
+    db.execute("CREATE TABLE decks (id INTEGER PRIMARY KEY, name TEXT)")
+    db.execute("CREATE TABLE notes (id INTEGER, mid INTEGER, flds TEXT)")
+    db.execute("CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER)")
+    db.execute("INSERT INTO notetypes VALUES (10, 'Basic')")
+    db.execute("INSERT INTO fields VALUES (10, 0, 'Front'), (10, 1, 'Back')")
+    db.execute("INSERT INTO decks VALUES (20, ?)", ("NEW-JLPT\x1feggrolls-JLPT10k-v3.5\x1f3-N3\x1f1-高频",))
+    db.execute("INSERT INTO decks VALUES (21, 'Parent::Child')")
+    db.execute("INSERT INTO notes VALUES (1, 10, 'Q1\x1fA1')")
+    db.execute("INSERT INTO notes VALUES (2, 10, 'Q2\x1fA2')")
+    db.execute("INSERT INTO cards VALUES (1, 1, 20)")
+    db.execute("INSERT INTO cards VALUES (2, 2, 21)")
+    db.commit()
+    db.close()
+    path = tmp_path / "nested.apkg"
+    _make_anki21b_apkg(path, db_path)
+    cards = deck.load_deck(path)
+    assert [(card.deck, card.front) for card in cards] == [("1-高频", "Q1"), ("Child", "Q2")]
