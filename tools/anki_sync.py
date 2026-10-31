@@ -83,10 +83,9 @@ def invoke_anki(deck, url: str, action: str, params: dict | None = None, api_key
 
 
 def _open_collection_copy(deck, path: Path):
-    if path.suffix == ".anki21b" or path.name.endswith(".anki21b"):
-        raise deck.DeckError("collection.anki21b is unsupported; use collection.anki2 or collection.anki21")
-    if path.suffix not in {".anki2", ".anki21"}:
-        raise deck.DeckError("collection must be collection.anki2 or collection.anki21")
+    is_21b = path.suffix == ".anki21b" or path.name.endswith(".anki21b")
+    if not is_21b and path.suffix not in {".anki2", ".anki21"}:
+        raise deck.DeckError("collection must be collection.anki2, collection.anki21, or collection.anki21b")
     if not path.is_file():
         raise deck.DeckError(f"collection not found: {path}")
     if anki_desktop_running():
@@ -98,14 +97,22 @@ def _open_collection_copy(deck, path: Path):
     temp = tempfile.TemporaryDirectory(prefix="passport-anki-col-")
     dest = Path(temp.name) / path.name
     try:
-        shutil.copy2(path, dest)
-        for suffix in ("-wal", "-shm"):
-            extra = Path(str(path) + suffix)
-            if extra.is_file():
-                shutil.copy2(extra, Path(temp.name) / extra.name)
+        if is_21b:
+            dest.with_suffix(".sqlite").write_bytes(
+                deck._decompress_anki21b(path.read_bytes(), path.name)
+            )
+            dest = dest.with_suffix(".sqlite")
+        else:
+            shutil.copy2(path, dest)
+            for suffix in ("-wal", "-shm"):
+                extra = Path(str(path) + suffix)
+                if extra.is_file():
+                    shutil.copy2(extra, Path(temp.name) / extra.name)
         connection = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error, deck.DeckError) as exc:
         temp.cleanup()
+        if isinstance(exc, deck.DeckError):
+            raise
         raise deck.DeckError(f"cannot open a read-only copy of the collection: {exc}") from exc
     connection.row_factory = sqlite3.Row
     return connection, temp
@@ -115,7 +122,7 @@ def _deck_names_from_connection(deck, connection: sqlite3.Connection) -> list[st
     tables = deck._table_names(connection)
     if {"notetypes", "fields", "decks"} <= tables:
         try:
-            return [str(row["name"]) for row in connection.execute("SELECT name FROM decks ORDER BY name")]
+            return sorted({deck._leaf_deck_name(str(row["name"])) for row in connection.execute("SELECT name FROM decks ORDER BY name")})
         except sqlite3.Error as exc:
             raise deck.DeckError(f"collection schema cannot list decks: {exc}") from exc
     if "col" not in tables:
@@ -130,7 +137,7 @@ def _deck_names_from_connection(deck, connection: sqlite3.Connection) -> list[st
         payload = json.loads(row["decks"])
     except (TypeError, json.JSONDecodeError) as exc:
         raise deck.DeckError(f"collection deck list is not JSON: {exc}") from exc
-    return sorted(str(value.get("name", "")) for value in payload.values() if isinstance(value, dict))
+    return sorted({deck._leaf_deck_name(str(value.get("name", ""))) for value in payload.values() if isinstance(value, dict)})
 
 
 def list_decks(deck, *, url: str | None, collection: Path | None, api_key: str | None) -> list[str]:

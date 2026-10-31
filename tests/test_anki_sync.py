@@ -435,3 +435,19 @@ def test_export_crc_mismatch_is_rejected():
     ])
     with pytest.raises(deck.DeckError, match="CRC"):
         anki_sync.fetch_export(deck, serial, timeout=1)
+
+
+def test_collection_copy_accepts_anki21b_file(tmp_path):
+    import zstandard
+    db_path = tmp_path / "plain.sqlite"
+    _schema18(db_path)
+    blob = zstandard.ZstdCompressor().compress(db_path.read_bytes())
+    path = tmp_path / "collection.anki21b"
+    path.write_bytes(blob)
+    names = anki_sync.list_decks(deck, url=None, collection=path, api_key=None)
+    assert names == ["Language", "SkipMe"]
+    cards, source, _imported = anki_sync.pull_decks(
+        deck, ["Language"], url=None, collection=path, api_key=None, map_path=None,
+    )
+    assert source == "collection"
+    assert cards == [deck.Card(1, "Language", "Question", "Answer", "99", "7")]
