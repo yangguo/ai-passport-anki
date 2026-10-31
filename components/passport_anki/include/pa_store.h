@@ -8,9 +8,12 @@
 #include <stdint.h>
 
 /* Flash-backed collection for up to 12,000 cards.
- * Card text lives in the cards partition and is read per card.
- * Scheduling records live in wear-leveled 4 KiB chunks in the sched partition.
- * A review log occupies the last 48 sectors of that same partition (8 bytes per grade).
+ * Text and schedule live in windows after the verified app image, not in
+ * partition-table entries. 0x460000 and 0xD0000 below are the full-collection
+ * window sizes. A Cover Arts slot mounts smaller windows.
+ * Scheduling records live in wear-leveled 4 KiB chunks in the sched window.
+ * A review log occupies the tail of that window (48 sectors on the full
+ * layout, 8 bytes per grade).
  * Steady-state RAM is one pa_store (see PA_STORE_RAM_BUDGET), not one object per card.
  *
  * The legacy PAK1 snapshot (pa_encode/pa_decode, 64 cards) still migrates in. */
@@ -36,7 +39,7 @@
 #define PA_SCHED_CHUNKS ((PA_STORE_MAX_CARDS + PA_SCHED_PER_CHUNK - 1u) / PA_SCHED_PER_CHUNK)
 #define PA_POOL_CAP 240u
 #define PA_META_SECTORS 4u
-/* Tail of the sched partition. 8-byte review records, not Anki intervals. */
+/* Tail of the sched window. 8-byte review records, not Anki intervals. */
 #define PA_REVLOG_SECTORS 48u
 #define PA_REVLOG_HEADER 32u
 #define PA_REVLOG_RECORD 8u

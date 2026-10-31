@@ -67,10 +67,12 @@ Migration stays best-effort and never calls `nvs_flash_erase`.
 Inside a slot the structural cap is 256 cards, with 4096 bytes of card text
 per slot and one review-log sector (508 grades). A JLPT-sized card is on the
 order of 180 bytes, so a slot holds a couple dozen of those, not the
-10,641-card sample. A 511-byte field leaves room for only a handful. The host
-reads `cap` from `INFO` and refuses to `BEGIN` when the deck is larger.
+10,641-card sample. A 511-byte field leaves room for only a handful. The host reads `cap` and `room` from `INFO` and refuses to `BEGIN` when the
+deck has more cards than `cap` or the payload has more bytes than `room`.
 `BEGIN` still rejects a payload that does not fit the slot. Standalone factory
-tail keeps `cap=12000`.
+tail keeps `cap=12000`. The image pad runs as a CMake `POST_BUILD` on `app`,
+and `tools/validate_firmware.sh` checks the padded bytes again after
+`merge-bin` copies them into `build/artifacts`.
 
 On the deck list, holding UP for the BSP long-press time (500 ms, not 1.5 s)
 calls `launcher_contract_return_to_factory`. There is no separate cover page.

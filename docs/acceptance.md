@@ -49,10 +49,10 @@
 
 | 项目 | 当前状态 | 证据 |
 |---|---|---|
-| 主机 CTest（ASan+UBSan） | PASS | `cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON` 后 CTest 8/8：core、codec、store、layout、cover、protocol、import、font_config。store 覆盖满窗口 10,000 张、60 KiB 槽规划（cap 256、payload 4096）、无复习日志时评分仍成功且 `dropped` 加一 |
-| Python | PASS | pytest 48：`test_deck.py`、`test_anki_sync.py`、`test_simulator.py`、`test_image_pad.py`。上传在 `cap` 小于牌组时于 `BEGIN` 前拒绝 |
-| ESP32-C3 编译 / 补齐 / 分区 | PASS | 本机 ESP-IDF 5.5.3 `tools/validate_firmware.sh`。补齐后应用镜像 2,232,320 字节，`length % 65536 = 4096`；factory `0x7F0000`，尾部 6,090,752 字节，大于 12,000 张窗口 `0x530000`。链接期 DRAM 116,186 / 321,296，剩余 205,110。未把镜像刷到设备 |
-| 真机：Cover Arts 安装、槽内读写、返回启动器、六行学习画面 | NOT RUN | 未刷写、未在启动器里安装、未看屏幕 |
+| 主机 CTest（ASan+UBSan） | PASS | `CC=gcc cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON` 后 CTest 9/9：core、codec、store、layout、cover、tail、protocol、import、font_config。`tail` 覆盖识别槽、factory 整段尾部、以及同样大但不是 factory 的分区拒绝挂载。store 仍覆盖满窗口 10,000 张、60 KiB 槽规划（cap 256、payload 4096）、无复习日志时评分仍成功且 `dropped` 加一 |
+| Python | PASS | pytest 49：`test_deck.py`、`test_anki_sync.py`、`test_simulator.py`、`test_image_pad.py`。上传在 `cap` 小于牌组、或 payload 字节数大于 `room` 时于 `BEGIN` 前拒绝 |
+| ESP32-C3 编译 / 补齐 / 分区 | PASS | 本机 ESP-IDF 5.5.3 `tools/validate_firmware.sh`。CMake `POST_BUILD` 把应用镜像从 2,193,904 补到 2,232,320 字节，`length % 65536 = 4096`。合并进 `artifacts/full.bin` 之后，`0x10000` 处的字节与 `artifacts/app.bin` 相同。factory `0x7F0000`，尾部 6,090,752 字节，大于 12,000 张窗口 `0x530000`。链接期 DRAM 116,186 / 321,296，剩余 205,110。未把镜像刷到设备 |
+| 真机：Cover Arts 安装、槽内读写、返回启动器、六行学习画面 | NOT RUN | 未刷写、未在启动器里安装、未看屏幕。固件 CI 仍是 `workflow_dispatch`，这次没有派发 |
 
 槽内结构上限是 256 张、每槽 4096 字节正文、复习日志 1 个扇区。这不是 12,000 张，也不是一份 JLPT 万词牌能放进槽里的承诺。独立 factory 尾部仍使用原来的 `0x460000` + `0xD0000`。上面旧的 CI 镜像哈希对应当时的分区表，不能拿来核对这一版 `app.bin`。
 

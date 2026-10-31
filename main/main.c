@@ -20,6 +20,7 @@
 #include "pa_layout.h"
 #include "pa_protocol.h"
 #include "pa_store.h"
+#include "pa_tail.h"
 #include "passport_anki.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -121,15 +122,6 @@ static bool win_erase(void *ctx, uint32_t offset, uint32_t length)
     return part_erase((void *)win->part, win->base + offset, length);
 }
 
-static uint32_t align_up(uint32_t value, uint32_t boundary)
-{
-    uint32_t mask = boundary - 1u;
-    if (value > UINT32_MAX - mask) {
-        return 0;
-    }
-    return (value + mask) & ~mask;
-}
-
 static bool sidecar_magic(const esp_partition_t *part, uint32_t offset)
 {
     char magic[4];
@@ -140,15 +132,25 @@ static bool sidecar_magic(const esp_partition_t *part, uint32_t offset)
            memcmp(magic, "DPS1", 4) == 0;
 }
 
-/* Card bytes follow the verified image. A Cover Arts slot is
- * align64k(image) + 64 KiB; that last 64 KiB is the sidecar, not card data.
- * Standalone factory uses the rest of the partition. Addresses are not logged. */
+static bool running_is_factory(const esp_partition_t *part)
+{
+    return part->type == ESP_PARTITION_TYPE_APP &&
+           part->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY &&
+           strcmp(part->label, "factory") == 0;
+}
+
+/* Card bytes follow the verified image. Recognized slot size or a DPS1
+ * sidecar keeps the last 64 KiB. Only factory may use the rest of the
+ * partition. Any other size is refused so an import cannot erase a sidecar
+ * or the gap. Addresses are not logged. */
 static bool open_tail_storage(void)
 {
     const esp_partition_t *part = esp_ota_get_running_partition();
     esp_partition_pos_t pos;
     esp_image_metadata_t meta;
     uint32_t image_len, data_start, data_end, data_size, cards_bytes, sched_bytes;
+    uint32_t bank_a, bank_b;
+    bool sidecar = false;
     if (part == NULL) {
         return false;
     }
@@ -159,21 +161,12 @@ static bool open_tail_storage(void)
         return false;
     }
     image_len = meta.image_len;
-    data_start = align_up(image_len, PA_STORE_SECTOR);
-    if (data_start == 0 || data_start >= part->size) {
-        return false;
+    if (pa_tail_sidecar_banks(part->size, image_len, &bank_a, &bank_b)) {
+        sidecar = sidecar_magic(part, bank_a) || sidecar_magic(part, bank_b);
     }
-    data_end = part->size;
-    if (part->size == align_up(image_len, 65536u) + 0x10000u) {
-        data_end = part->size - 0x10000u;
-    } else if (part->size >= 0x10000u) {
-        uint32_t side = part->size - 0x10000u;
-        if (side >= data_start &&
-            (sidecar_magic(part, side + 0xA000u) || sidecar_magic(part, side + 0xB000u))) {
-            data_end = side;
-        }
-    }
-    if (data_end < data_start) {
+    if (!pa_tail_data_end(part->size, image_len, running_is_factory(part), sidecar, &data_start,
+                          &data_end)) {
+        ESP_LOGE(TAG, "card storage refused; partition is not a slot, DPS1 sidecar, or factory");
         return false;
     }
     data_size = data_end - data_start;
@@ -366,8 +359,9 @@ static void handle_line(char *line) {
     if (!pa_protocol_parse(line, strlen(line), &command)) { reply_error("COMMAND"); return; }
     switch (command.kind) {
     case PA_PROTOCOL_INFO:
-        printf("OK INFO version=%u cards=%u day=%" PRIu32 " cap=%u\n", PA_PROTOCOL_VERSION,
-               pa_store_count(&store), pa_store_now(&store) / 1440U, pa_store_capacity(&store));
+        printf("OK INFO version=%u cards=%u day=%" PRIu32 " cap=%u room=%" PRIu32 "\n",
+               PA_PROTOCOL_VERSION, pa_store_count(&store), pa_store_now(&store) / 1440U,
+               pa_store_capacity(&store), pa_store_payload_limit(&store));
         fflush(stdout);
         return;
     case PA_PROTOCOL_BEGIN: {

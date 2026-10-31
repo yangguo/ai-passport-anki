@@ -22,6 +22,9 @@ if(ANKI_HOST)
   add_executable(test_cover tests/test_cover.c main/pa_cover.c)
   target_include_directories(test_cover PRIVATE main)
   add_test(NAME cover COMMAND test_cover)
+  add_executable(test_tail tests/test_tail.c main/pa_tail.c)
+  target_include_directories(test_tail PRIVATE main)
+  add_test(NAME tail COMMAND test_tail)
   add_executable(test_protocol tests/test_protocol.c main/pa_protocol.c)
   target_link_libraries(test_protocol passport_anki)
   add_test(NAME protocol COMMAND test_protocol)
@@ -34,4 +37,12 @@ if(ANKI_HOST)
 else()
   include($ENV{IDF_PATH}/tools/cmake/project.cmake)
   project(ai-passport-anki)
+  # elf2image writes the .bin before the `app` target finishes. Pad that
+  # file in place so `idf.py build` itself leaves the 60 KiB slot gap.
+  idf_build_get_property(build_dir BUILD_DIR)
+  add_custom_command(TARGET app POST_BUILD
+    COMMAND python3 "${CMAKE_SOURCE_DIR}/tools/esp_image_pad.py"
+            "${build_dir}/ai-passport-anki.bin"
+    VERBATIM
+  )
 endif()
