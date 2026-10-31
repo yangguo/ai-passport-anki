@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild the checked-in 16px AI Passport font from the pinned Noto source."""
+"""Rebuild checked-in AI Passport LVGL fonts from the pinned Noto source."""
 from __future__ import annotations
 
 import argparse
@@ -42,9 +42,16 @@ def spans(codepoints: set[int]) -> list[list[int]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--font", type=Path, default=ROOT / CANONICAL_FONT_PATH, help="Pinned Noto Sans SC Regular OTF")
-    parser.add_argument("--output", type=Path, default=ROOT / "assets/fonts/pa_font_16.c")
-    parser.add_argument("--manifest", type=Path, default=ROOT / "assets/fonts/pa_font_16.manifest.json")
+    parser.add_argument("--size", type=int, default=16, help="Rendered font size in px (default 16)")
+    parser.add_argument("--symbol", type=str, default="", help="LVGL font symbol (default pa_font_<size>)")
+    parser.add_argument("--output", type=Path, default=None, help="Output .c path (default assets/fonts/<symbol>.c)")
+    parser.add_argument("--manifest", type=Path, default=None, help="Manifest path (default beside output)")
     args = parser.parse_args()
+    if args.size < 8 or args.size > 48:
+        parser.error("--size must be between 8 and 48")
+    symbol = args.symbol or f"pa_font_{args.size}"
+    output = args.output or (ROOT / f"assets/fonts/{symbol}.c")
+    manifest_path = args.manifest or output.with_suffix(".manifest.json")
     try:
         from fontTools.ttLib import TTFont
     except ImportError:
@@ -69,9 +76,9 @@ def main() -> int:
     if not available:
         parser.error("font source has none of the requested glyphs")
 
-    manifest = {
-        "font_symbol": "pa_font_16",
-        "font_size_px": 16,
+    manifest_data = {
+        "font_symbol": symbol,
+        "font_size_px": args.size,
         "bpp": 2,
         "font_family": "Noto Sans SC",
         "source_repository": PINNED_REPOSITORY,
@@ -87,17 +94,17 @@ def main() -> int:
         "supported_glyph_count": len(available),
         "unsupported_glyph_count": len(missing),
     }
-    args.manifest.parent.mkdir(parents=True, exist_ok=True)
-    args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    output_arg = args.output.relative_to(ROOT) if args.output.resolve().is_relative_to(ROOT) else args.output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output_arg = output.relative_to(ROOT) if output.resolve().is_relative_to(ROOT) else output
     # Do not pass --no-compress. bpp 2 then sets bitmap_format to 1, and
     # sdkconfig.defaults must keep CONFIG_LV_USE_FONT_COMPRESSED=y or the
     # panel draws no glyphs.
-    command = ["npx", "--yes", f"lv_font_conv@{PINNED_LV_FONT_CONV}", "--size", "16", "--bpp", "2",
+    command = ["npx", "--yes", f"lv_font_conv@{PINNED_LV_FONT_CONV}", "--size", str(args.size), "--bpp", "2",
                "--format", "lvgl", "--font", CANONICAL_FONT_PATH.as_posix(), "--no-kerning",
-               "--lv-include", "lvgl.h", "--lv-font-name", "pa_font_16", "--output", str(output_arg)]
+               "--lv-include", "lvgl.h", "--lv-font-name", symbol, "--output", str(output_arg)]
     for start, end in spans(available):
         command.extend(["--range", f"0x{start:X}-0x{end:X}"])
     try:

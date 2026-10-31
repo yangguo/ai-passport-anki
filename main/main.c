@@ -33,6 +33,7 @@
 #define MINUTE_US (60LL * 1000 * 1000)
 
 extern const lv_font_t pa_font_16;
+extern const lv_font_t pa_font_20;
 static const char *TAG = "anki";
 static pa_store store;
 static pa_flash cards_flash;
@@ -246,11 +247,10 @@ static bool open_tail_storage(void)
 static uint16_t glyph_width(uint32_t cp, void *user) {
     (void)user;
     lv_font_glyph_dsc_t glyph;
-    if (!lv_font_get_glyph_dsc(&pa_font_16, &glyph, cp, 0) || glyph.is_placeholder) {
+    if (!lv_font_get_glyph_dsc(&pa_font_20, &glyph, cp, 0) || glyph.is_placeholder) {
         return 0;
     }
-    /* LVGL stores advance width in 1/16 px; layout width is in pixels. */
-    return (uint16_t)((glyph.adv_w + 15u) >> 4);
+    return glyph.adv_w;
 }
 
 static bool text_fits(const char *text) {
@@ -418,6 +418,7 @@ static void render(void) {
     }
 draw_labels:
     sync_study_chrome();
+    lv_obj_set_style_text_font(body_label, study_card_ui() ? &pa_font_20 : &pa_font_16, 0);
     lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
     lv_label_set_long_mode(body_label, body_wrap ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_CLIP);
     lv_label_set_long_mode(footer_label, LV_LABEL_LONG_CLIP);
@@ -767,7 +768,7 @@ void app_main(void) {
     }
     {
         static const char *grade_names[] = {"Again", "Hard", "Good", "Easy"};
-        const int chip_w = (PA_STUDY_TEXT_WIDTH - 4) / 2;
+        const int chip_w = (PA_STUDY_TEXT_WIDTH - 2 * PA_STUDY_GRADE_PAD - PA_STUDY_GRADE_GAP) / 2;
         const int chip_h = PA_STUDY_GRADE_ROW_H;
         lv_obj_t *screen = lv_screen_active();
         lv_obj_set_style_bg_color(screen, lv_color_hex(0x12161C), 0);
@@ -802,7 +803,7 @@ void app_main(void) {
         lv_obj_set_style_bg_color(footer_panel, lv_color_hex(0x0E1218), 0);
         lv_obj_set_style_bg_opa(footer_panel, LV_OPA_70, 0);
         lv_obj_set_style_radius(footer_panel, 8, 0);
-        lv_obj_set_style_pad_all(footer_panel, 4, 0);
+        lv_obj_set_style_pad_all(footer_panel, PA_STUDY_GRADE_PAD, 0);
         lv_obj_add_flag(footer_panel, LV_OBJ_FLAG_HIDDEN);
         footer_label = lv_label_create(screen);
         lv_obj_set_pos(footer_label, PA_STUDY_MARGIN_X, PA_STUDY_FOOTER_Y);
@@ -818,7 +819,8 @@ void app_main(void) {
             const int row = i / 2;
             grade_chip[i] = lv_obj_create(footer_panel);
             lv_obj_remove_style_all(grade_chip[i]);
-            lv_obj_set_pos(grade_chip[i], 4 + col * (chip_w + 4), 4 + row * (chip_h + 4));
+            lv_obj_set_pos(grade_chip[i], PA_STUDY_GRADE_PAD + col * (chip_w + PA_STUDY_GRADE_GAP),
+                           PA_STUDY_GRADE_PAD + row * (chip_h + PA_STUDY_GRADE_GAP));
             lv_obj_set_size(grade_chip[i], chip_w, chip_h);
             lv_obj_set_style_radius(grade_chip[i], 6, 0);
             lv_obj_set_style_bg_opa(grade_chip[i], LV_OPA_COVER, 0);
