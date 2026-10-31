@@ -27,6 +27,7 @@ MAX_CHUNK_BYTES = 480
 UINT32_MAX = 0xFFFFFFFF
 PROTOCOL_VERSION = 2
 APKG_DB_MAX_BYTES = 16 * 1024 * 1024
+APKG_DECOMPRESSED_MAX_BYTES = 64 * 1024 * 1024
 FONT_MANIFEST = Path(__file__).resolve().parents[1] / "assets/fonts/pa_font_16.manifest.json"
 
 
@@ -213,6 +214,19 @@ def _read_tsv(path: Path) -> list[Card]:
     return _finish(cards)
 
 
+def _decompress_anki21b(data: bytes, member: str) -> bytes:
+    try:
+        import zstandard
+    except ImportError as exc:
+        raise DeckError(
+            f"{member} is zstd-compressed; install it with: pip install -r requirements.txt"
+        ) from exc
+    try:
+        return zstandard.ZstdDecompressor().decompress(data, max_output_size=APKG_DECOMPRESSED_MAX_BYTES)
+    except Exception as exc:
+        raise DeckError(f"cannot decompress {member}: {exc}") from exc
+
+
 def _apkg_database(path: Path) -> bytes:
     try:
         archive = zipfile.ZipFile(path, "r")
@@ -221,22 +235,25 @@ def _apkg_database(path: Path) -> bytes:
     with archive:
         names = set(archive.namelist())
         if "collection.anki21b" in names:
-            raise DeckError("collection.anki21b compressed APKG is unsupported; export UTF-8 TSV from Anki")
-        if "collection.anki21" in names:
+            member = "collection.anki21b"
+        elif "collection.anki21" in names:
             member = "collection.anki21"
         elif "collection.anki2" in names:
             member = "collection.anki2"
         else:
             member = None
         if member is None:
-            raise DeckError("APKG must contain collection.anki2 or collection.anki21")
+            raise DeckError("APKG must contain collection.anki2, collection.anki21, or collection.anki21b")
         info = archive.getinfo(member)
         if info.file_size > APKG_DB_MAX_BYTES:
             raise DeckError(f"APKG collection exceeds {APKG_DB_MAX_BYTES} byte conversion limit")
         try:
-            return archive.read(member)
+            blob = archive.read(member)
         except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
             raise DeckError(f"cannot read APKG collection: {exc}") from exc
+        if member == "collection.anki21b":
+            return _decompress_anki21b(blob, member)
+        return blob
 
 
 def _field_names(model: dict) -> list[str]:

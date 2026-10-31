@@ -129,17 +129,63 @@ def test_apkg_rejects_cloze_and_custom_models(tmp_path):
         deck.load_deck(custom)
 
 
-def test_apkg_rejects_compressed_and_missing_collection(tmp_path):
-    compressed = tmp_path / "compressed.apkg"
-    with zipfile.ZipFile(compressed, "w") as archive:
-        archive.writestr("collection.anki21b", b"compressed")
-    with pytest.raises(deck.DeckError, match="anki21b.*unsupported"):
-        deck.load_deck(compressed)
+def test_apkg_rejects_missing_collection(tmp_path):
     empty = tmp_path / "empty.apkg"
     with zipfile.ZipFile(empty, "w") as archive:
         archive.writestr("media", "{}")
     with pytest.raises(deck.DeckError, match="collection.anki2.*collection.anki21"):
         deck.load_deck(empty)
+
+
+def _make_anki21b_apkg(path, db_path, extra_members=None):
+    import zstandard
+    raw = db_path.read_bytes()
+    blob = zstandard.ZstdCompressor().compress(raw)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("collection.anki21b", blob)
+        for name, data_path in (extra_members or {}).items():
+            archive.write(data_path, name)
+
+
+def test_apkg_prefers_anki21b_over_stub_anki2(tmp_path):
+    stub = tmp_path / "stub.sqlite"
+    db = sqlite3.connect(stub)
+    db.execute("CREATE TABLE col (models TEXT, decks TEXT)")
+    db.execute("CREATE TABLE notes (id INTEGER, mid INTEGER, flds TEXT)")
+    db.execute("CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER)")
+    db.execute("INSERT INTO col VALUES (?, ?)", (
+        '{"10":{"id":10,"name":"Basic","type":0,"flds":[{"name":"Front"},{"name":"Back"}]}}',
+        '{"20":{"id":20,"name":"Stub"}}',
+    ))
+    db.execute("INSERT INTO notes VALUES (1, 10, 'Wrong\x1fSide')")
+    db.execute("INSERT INTO cards VALUES (1, 1, 20)")
+    db.commit()
+    db.close()
+    real = tmp_path / "real-collection.sqlite"
+    rdb = sqlite3.connect(real)
+    rdb.execute("CREATE TABLE col (models TEXT, decks TEXT)")
+    rdb.execute("CREATE TABLE notes (id INTEGER, mid INTEGER, flds TEXT)")
+    rdb.execute("CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER)")
+    rdb.execute("INSERT INTO col VALUES (?, ?)", (
+        '{"10":{"id":10,"name":"Basic","type":0,"flds":[{"name":"Front"},{"name":"Back"}]}}',
+        '{"20":{"id":20,"name":"Real"}}',
+    ))
+    rdb.execute("INSERT INTO notes VALUES (1, 10, 'Right\x1fSide')")
+    rdb.execute("INSERT INTO cards VALUES (1, 1, 20)")
+    rdb.commit()
+    rdb.close()
+    path = tmp_path / "mixed.apkg"
+    _make_anki21b_apkg(path, real, {"collection.anki2": stub})
+    cards = deck.load_deck(path)
+    assert cards == [deck.Card(1, "Real", "Right", "Side", "1", "1")]
+
+
+def test_apkg_rejects_corrupt_anki21b(tmp_path):
+    path = tmp_path / "corrupt.apkg"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("collection.anki21b", b"not zstd data at all............")
+    with pytest.raises(deck.DeckError, match="anki21b"):
+        deck.load_deck(path)
 
 
 class FakeSerial:
