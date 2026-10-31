@@ -3,6 +3,7 @@
 #include "bsp_display.h"
 #include "bsp_power.h"
 #include "bsp_pins.h"
+#include "esp_flash_internal.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -99,27 +100,78 @@ static bool part_erase(void *ctx, uint32_t offset, uint32_t length)
 typedef struct {
     const esp_partition_t *part;
     uint32_t base;
+    uint32_t size;
 } pa_part_win;
 
 static pa_part_win cards_win;
 static pa_part_win sched_win;
+static pa_tail_bounds tail_bounds;
+
+static bool tail_set_protect(void *ctx, bool protect)
+{
+    const esp_partition_t *part = ctx;
+    if (part == NULL || part->flash_chip == NULL) {
+        return false;
+    }
+    return esp_flash_set_dangerous_write_protection(part->flash_chip, protect) == ESP_OK;
+}
+
+static bool part_erase_io(void *ctx, uint32_t offset, uint32_t length, const void *src)
+{
+    (void)src;
+    return part_erase(ctx, offset, length);
+}
+
+static bool part_write_io(void *ctx, uint32_t offset, uint32_t length, const void *src)
+{
+    return part_write(ctx, offset, src, length);
+}
+
+static bool win_span(const pa_part_win *win, uint32_t offset, uint32_t span, uint32_t *absolute)
+{
+    if (win == NULL || win->part == NULL || absolute == NULL || span == 0 || win->size == 0 ||
+        offset > win->size || span > win->size - offset || offset > UINT32_MAX - win->base) {
+        return false;
+    }
+    *absolute = win->base + offset;
+    return true;
+}
 
 static bool win_read(void *ctx, uint32_t offset, void *dst, uint32_t length)
 {
     pa_part_win *win = ctx;
-    return part_read((void *)win->part, win->base + offset, dst, length);
+    uint32_t absolute = 0;
+    if (dst == NULL || !win_span(win, offset, length, &absolute)) {
+        return false;
+    }
+    return part_read((void *)win->part, absolute, dst, length);
 }
 
+/* The tail is inside the running app partition. A direct erase or write
+ * calls abort() while IDF dangerous-write protection is on, which is the
+ * default. These two wrappers allow only the post-image span and drop that
+ * protection for the call. */
 static bool win_write(void *ctx, uint32_t offset, const void *src, uint32_t length)
 {
     pa_part_win *win = ctx;
-    return part_write((void *)win->part, win->base + offset, src, length);
+    uint32_t absolute = 0;
+    uint32_t span = pa_tail_programmed_length(length);
+    if (src == NULL || !win_span(win, offset, span, &absolute)) {
+        return false;
+    }
+    return pa_tail_protected_io(&tail_bounds, tail_set_protect, (void *)win->part, absolute, length, src,
+                                true, part_write_io, (void *)win->part);
 }
 
 static bool win_erase(void *ctx, uint32_t offset, uint32_t length)
 {
     pa_part_win *win = ctx;
-    return part_erase((void *)win->part, win->base + offset, length);
+    uint32_t absolute = 0;
+    if (!win_span(win, offset, length, &absolute)) {
+        return false;
+    }
+    return pa_tail_protected_io(&tail_bounds, tail_set_protect, (void *)win->part, absolute, length, NULL,
+                                false, part_erase_io, (void *)win->part);
 }
 
 static bool sidecar_magic(const esp_partition_t *part, uint32_t offset)
@@ -151,6 +203,7 @@ static bool open_tail_storage(void)
     uint32_t image_len, data_start, data_end, data_size, cards_bytes, sched_bytes;
     uint32_t bank_a, bank_b;
     bool sidecar = false;
+    memset(&tail_bounds, 0, sizeof(tail_bounds));
     if (part == NULL) {
         return false;
     }
@@ -174,8 +227,14 @@ static bool open_tail_storage(void)
         cards_bytes > data_size || sched_bytes > data_size - cards_bytes) {
         return false;
     }
-    cards_win = (pa_part_win){.part = part, .base = data_start};
-    sched_win = (pa_part_win){.part = part, .base = data_start + cards_bytes};
+    tail_bounds = (pa_tail_bounds){
+        .part_size = part->size,
+        .image_len = image_len,
+        .data_start = data_start,
+        .data_end = data_end,
+    };
+    cards_win = (pa_part_win){.part = part, .base = data_start, .size = cards_bytes};
+    sched_win = (pa_part_win){.part = part, .base = data_start + cards_bytes, .size = sched_bytes};
     cards_flash = (pa_flash){.ctx = &cards_win, .size = cards_bytes,
                              .read = win_read, .write = win_write, .erase = win_erase};
     sched_flash = (pa_flash){.ctx = &sched_win, .size = sched_bytes,
@@ -376,9 +435,9 @@ static void handle_line(char *line) {
         session.revealed = false;
         import_last_input = esp_timer_get_time();
         ui = UI_IMPORTING;
-        render();
         printf("OK BEGIN resume=%" PRIu32 "\n", resume);
         fflush(stdout);
+        render();
         return;
     }
     case PA_PROTOCOL_CHUNK: {
@@ -427,9 +486,9 @@ static void handle_line(char *line) {
     case PA_PROTOCOL_ABORT:
         abort_import();
         ui = storage_corrupt ? UI_ERROR : UI_DECKS;
-        render();
         printf("OK ABORT\n");
         fflush(stdout);
+        render();
         return;
     case PA_PROTOCOL_DAY: {
         const uint32_t day = command.value;

@@ -71,3 +71,56 @@ bool pa_tail_data_end(uint32_t part_size, uint32_t image_len, bool is_factory,
     }
     return false;
 }
+
+bool pa_tail_span_allowed(const pa_tail_bounds *bounds, uint32_t offset, uint32_t length)
+{
+    uint32_t image_end;
+    if (bounds == NULL || length == 0 || bounds->image_len == 0 || bounds->part_size == 0) {
+        return false;
+    }
+    image_end = align_up(bounds->image_len, PA_TAIL_SECTOR);
+    if (image_end == 0 || bounds->data_start < image_end || bounds->data_end < bounds->data_start ||
+        bounds->data_end > bounds->part_size) {
+        return false;
+    }
+    if (offset < bounds->data_start || offset > bounds->data_end || length > bounds->data_end - offset) {
+        return false;
+    }
+    return true;
+}
+
+uint32_t pa_tail_programmed_length(uint32_t length)
+{
+    if (length == 0 || length > UINT32_MAX - 15u) {
+        return 0;
+    }
+    return (length + 15u) & ~15u;
+}
+
+bool pa_tail_protected_io(const pa_tail_bounds *bounds, pa_tail_set_protect_fn set_protect,
+                          void *protect_ctx, uint32_t offset, uint32_t length, const void *src,
+                          bool pad_to_16, pa_tail_io_fn io, void *io_ctx)
+{
+    uint32_t span = length;
+    bool ok;
+    bool restored;
+    if (bounds == NULL || set_protect == NULL || io == NULL || length == 0) {
+        return false;
+    }
+    if (pad_to_16) {
+        span = pa_tail_programmed_length(length);
+        if (span == 0) {
+            return false;
+        }
+    }
+    if (!pa_tail_span_allowed(bounds, offset, span)) {
+        return false;
+    }
+    if (!set_protect(protect_ctx, false)) {
+        (void)set_protect(protect_ctx, true);
+        return false;
+    }
+    ok = io(io_ctx, offset, length, src);
+    restored = set_protect(protect_ctx, true);
+    return ok && restored;
+}
