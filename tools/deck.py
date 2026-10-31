@@ -23,7 +23,12 @@ MAX_DECKS = 64
 MAX_DECK_BYTES = 47
 MAX_TEXT_BYTES = 511
 MAX_LINE_BYTES = 1200
-MAX_CHUNK_BYTES = 480
+# Device console consumes USB serial per ~64B packet without stream reassembly,
+# so any command line over ~64 chars fragments into ERR LINE. CHUNK lines must
+# stay well below 64 chars: "CHUNK <off> " prefix (up to 13 chars at 6-digit
+# offsets) plus hex payload. 20 data bytes -> 40 hex chars -> at most
+# ~53-char lines with solid margin for USB packet-boundary jitter.
+MAX_CHUNK_BYTES = 20
 UINT32_MAX = 0xFFFFFFFF
 PROTOCOL_VERSION = 2
 APKG_DB_MAX_BYTES = 16 * 1024 * 1024

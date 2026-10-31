@@ -75,10 +75,15 @@ def test_commands_are_hex_encoded_bounded_and_finish_with_commit(tmp_path):
     payload = deck.payload_for(cards)
     crc = zlib.crc32(payload) & 0xFFFFFFFF
     assert commands[0] == f"BEGIN 1 {crc} {len(payload)}"
-    assert commands[1] == f"CHUNK 0 {payload.hex()}"
+    chunks = [line for line in commands if line.startswith("CHUNK ")]
+    assert chunks, "payload must be sent in at least one chunk"
+    reassembled = b"".join(bytes.fromhex(line.split(" ", 2)[2]) for line in chunks)
+    assert reassembled == payload
     assert commands[-1] == "COMMIT"
     assert payload[4:9] == bytes([len("中文".encode()), 6, 0, 6, 0])
     assert all(len(line.encode("ascii")) <= deck.MAX_LINE_BYTES for line in commands)
+    # Device console fragments lines over ~64 chars (no USB stream reassembly).
+    assert all(len(line.encode("ascii")) <= 60 for line in commands)
 
 
 def test_command_stream_rejects_embedded_nul_and_unsupported_glyph(tmp_path):
