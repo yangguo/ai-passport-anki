@@ -159,7 +159,7 @@ UTF-8 规则不变：拒绝截断、多余 continuation、overlong、surrogate�
 
 ## 8. 三键 UI 与排版
 
-统一安全内容矩形 x=18..221、y=30..289。背景深色，正文16px，标题和页脚较小；避免圆角裁切。主状态：DECKS、QUESTION、ANSWER、RATING、EMPTY、NEXT_DAY_CONFIRM、IMPORTING、ERROR。
+统一安全内容矩形 x=18..221、y=30..289。背景深色，正文用 20px 字体、标题和页脚 16px；避免圆角裁切。主状态：DECKS、QUESTION、ANSWER、RATING、EMPTY、NEXT_DAY_CONFIRM、IMPORTING、ERROR。
 
 | 状态 | UP/DOWN 短按 | OK 短按 | OK 长按 |
 |---|---|---|---|
@@ -172,7 +172,7 @@ UTF-8 规则不变：拒绝截断、多余 continuation、overlong、surrogate�
 | IMPORTING | 忽略 | 忽略 | 中止事务 |
 | ERROR | 无业务变更 | 重试/返回 | 返回安全首页 |
 
-每屏显示牌组、逻辑 day、当前卡/总数、Q/A、页码、操作提示。答案不能靠 UP/DOWN 无意泄露。长文本必须按 UTF-8 字符边界和字体宽度自动换行后分页；不能把 CJK 字节硬切。正文最大 511 字节。分页按 UTF-8 边界和字体宽度换行；中文、假名、英文长单词和换行都要测。每屏最多 4 行，页数上限 64，511 字节能放下。
+每屏显示牌组、逻辑 day、当前卡/总数、Q/A、页码、操作提示。答案不能靠 UP/DOWN 无意泄露。长文本必须按 UTF-8 字符边界和字体宽度自动换行后分页；不能把 CJK 字节硬切。正文最大 511 字节。分页按 UTF-8 边界和字体宽度换行；中文、假名、英文长单词和换行都要测。正文左对齐，和官方牌组 CSS 的 `text-align:left`、AnkiDroid 的卡面一致；居中会让短行（声调圈号、单个词性字）漂在面板中间并浪费两侧空白。每屏最多 5 行，页数上限 64，511 字节能放下。
 
 没有到期卡显示“本次已完成”及等待/推进学习日入口，不自动推进一天以凑下一张。Again 的一分钟到期要由开机计时器触发刷新，无需离开页面。
 
@@ -204,11 +204,11 @@ PAK1（magic `PAK1`，version 1，末尾 CRC32）仍是迁移输入。解码失�
 
 规范 TSV：UTF-8（允许 BOM），标题 `id\tdeck\tfront\tback`。使用 Python csv delimiter=tab，支持引用字段内的真实换行；ID 十进制1..UINT32_MAX。可支持 Anki文本导出（前/后两列，#分隔符/HTML注释），规范化由工具完成。
 
-旧式 APKG：只读 zip 内的 SQLite。同时存在 `collection.anki21` 和较小的 `collection.anki2` 时用 anki21（JLPT 包里的 anki2 是空壳）。`collection.anki21b` 解压后同读（压缩不超 16 MiB、解压后上限 64 MiB）；多成员按 anki21b > anki21 > anki2 取。不解压媒体，不执行 SQL 扩展或模板脚本。Basic 模型取前两个文本字段。字段名含 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组按 JLPT 规则转换：正面是词条，若注音不同再加一行；背面依次放声调、词性、简体释义、补充、第一条例句注音和简体例句释义。先去掉 `[sound:...]` 和图片标签，HTML 转成纯文本并保留 `<br>` 换行，再把 `汉字[假名]` 收成 `汉字（假名）`。背面超过 511 字节时先丢掉补充，再丢掉例句释义，仍然超出就报错，不截断。Cloze 和其它模型拒绝。一台笔记多张卡拒绝。
+旧式 APKG：只读 zip 内的 SQLite。同时存在 `collection.anki21` 和较小的 `collection.anki2` 时用 anki21（JLPT 包里的 anki2 是空壳）。`collection.anki21b` 解压后同读（压缩不超 16 MiB、解压后上限 64 MiB）；多成员按 anki21b > anki21 > anki2 取。不解压媒体，不执行 SQL 扩展或模板脚本。Basic 模型取前两个文本字段。字段名含 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组按 JLPT 规则转换：正面是词条，若注音不同再加一行；背面首行是「声调 词性 释义」（空字段跳过，和官方卡面一样紧凑），接着是补充（与释义相同时省略，因为该牌组会重复填），再放第一条例句注音和简体例句释义。先去掉 `[sound:...]` 和图片标签，HTML 转成纯文本并保留 `<br>` 换行，再把 `汉字[假名]` 收成 `汉字（假名）`。背面超过 511 字节时先丢掉补充，再丢掉例句释义，仍然超出就报错，不截断。Cloze 和其它模型拒绝。一台笔记多张卡拒绝。
 
 行协议 ASCII，正文 hex编码UTF-8；最大行1200字节，串口输入超过上限必须丢弃整个行并报错。reader遇到断线/半行不能重复上一命令。
 
-协议 version 2。正文不再一行一张卡，而是规范记录的二进制分块。每块最多 480 字节，hex 后仍低于 1200 字节行长。`zlib.crc32` 与设备 `pa_crc32` 对同一 payload 结果相同。
+协议 version 2。正文不再一行一张卡，而是规范记录的二进制分块。设备控制台按 USB 包（约 64 字节）切行且不拼流，所以主机每块只发 20 字节：hex 后每行不超过约 53 字符，留足包边界余量。`zlib.crc32` 与设备 `pa_crc32` 对同一 payload 结果相同。
 
 ```text
 INFO                              -> OK INFO version=2 cards=N day=D cap=C room=R

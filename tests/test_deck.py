@@ -291,48 +291,37 @@ def test_upload_rejects_payload_larger_than_device_room(tmp_path):
     assert serial.writes == ["INFO"]
 
 
-def test_jlpt_model_strips_media_and_expands_furigana(tmp_path):
-    path = tmp_path / "jlpt.apkg"
-    db_path = tmp_path / "jlpt.sqlite"
-    fields = "\x1f".join([
-        "note",
-        "漢字",
-        "①",
-        "名",
-        "漢[かん]字[じ]",
-        "<b>简体定义</b>",
-        "繁體",
-        "补充",
-        "[sound:vocab.mp3]",
-        "A", "", "", "",
-        "例[れい]文",
-        "例文",
-        "例句释义",
-        "例句繁体",
-        "[sound:sent.mp3]",
-        "", "", "", "", "", "", "", "", "",
-        "1", "", "",
-    ])
-    names = [
-        "NoteID", "VocabKanji", "VocabPitch", "VocabPoS", "VocabFurigana", "VocabDefSC", "VocabDefTC",
-        "VocabPlus", "VocabAudio", "SentType1", "SentType2", "SentType3", "SentType4",
-        "SentFurigana1", "SentKanji1", "SentDefSC1", "SentDefTC1", "SentAudio1",
-        "SentFurigana2", "SentKanji2", "SentDefSC2", "SentDefTC2", "SentAudio2",
-        "SentFurigana3", "SentKanji3", "SentDefSC3", "SentDefTC3", "SentAudio3",
-        "SentFurigana4", "SentKanji4", "SentDefSC4", "SentDefTC4", "SentAudio4",
-        "Order", "Alt1", "Alt2",
-    ]
+JLPT_FIELD_NAMES = [
+    "NoteID", "VocabKanji", "VocabPitch", "VocabPoS", "VocabFurigana", "VocabDefSC", "VocabDefTC",
+    "VocabPlus", "VocabAudio", "SentType1", "SentType2", "SentType3", "SentType4",
+    "SentFurigana1", "SentKanji1", "SentDefSC1", "SentDefTC1", "SentAudio1",
+    "SentFurigana2", "SentKanji2", "SentDefSC2", "SentDefTC2", "SentAudio2",
+    "SentFurigana3", "SentKanji3", "SentDefSC3", "SentDefTC3", "SentAudio3",
+    "SentFurigana4", "SentKanji4", "SentDefSC4", "SentDefTC4", "SentAudio4",
+    "Order", "Alt1", "Alt2",
+]
+
+
+def _jlpt_note(**values):
+    fields = [""] * len(JLPT_FIELD_NAMES)
+    for name, value in values.items():
+        fields[JLPT_FIELD_NAMES.index(name)] = value
+    return "\x1f".join(fields)
+
+
+def _write_jlpt_apkg(path: Path, note_fields: str, deck_name: str = "JLPT::N5::1-高频") -> None:
+    db_path = path.with_suffix(".sqlite")
     model = {"id": 10, "name": "eggrolls-JLPT10k-v3.5", "type": 0,
-             "flds": [{"name": name} for name in names]}
+             "flds": [{"name": name} for name in JLPT_FIELD_NAMES]}
     db = sqlite3.connect(db_path)
     db.execute("CREATE TABLE col (models TEXT, decks TEXT)")
     db.execute("CREATE TABLE notes (id INTEGER, mid INTEGER, flds TEXT)")
     db.execute("CREATE TABLE cards (id INTEGER PRIMARY KEY, nid INTEGER, did INTEGER)")
     db.execute("INSERT INTO col VALUES (?, ?)", (
         json.dumps({"10": model}),
-        json.dumps({"20": {"id": 20, "name": "JLPT::N5::1-高频"}}),
+        json.dumps({"20": {"id": 20, "name": deck_name}}),
     ))
-    db.execute("INSERT INTO notes VALUES (7, 10, ?)", (fields,))
+    db.execute("INSERT INTO notes VALUES (7, 10, ?)", (note_fields,))
     db.execute("INSERT INTO cards VALUES (99, 7, 20)")
     db.commit()
     db.close()
@@ -340,15 +329,42 @@ def test_jlpt_model_strips_media_and_expands_furigana(tmp_path):
         archive.write(db_path, "collection.anki2")
         archive.write(db_path, "collection.anki21")
         archive.writestr("0", b"not-media-extracted")
+
+
+def test_jlpt_model_strips_media_and_expands_furigana(tmp_path):
+    path = tmp_path / "jlpt.apkg"
+    _write_jlpt_apkg(path, _jlpt_note(
+        NoteID="note", VocabKanji="漢字", VocabPitch="①", VocabPoS="名",
+        VocabFurigana="漢[かん]字[じ]", VocabDefSC="<b>简体定义</b>", VocabDefTC="繁體",
+        VocabPlus="补充", VocabAudio="[sound:vocab.mp3]",
+        SentFurigana1="例[れい]文", SentKanji1="例文", SentDefSC1="例句释义", SentDefTC1="例句繁体",
+        SentAudio1="[sound:sent.mp3]", SentType1="1", Order="1",
+    ))
     card = deck.load_deck(path)[0]
     assert card.id == 1
     assert card.anki_id == "99"
     assert card.deck == "1-高频"
     assert card.front == "漢字\n漢（かん）字（じ）"
-    assert "简体定义" in card.back
-    assert "例（れい）文" in card.back
+    assert card.back == "① 名 简体定义\n补充\n例（れい）文\n例句释义"
     assert "sound" not in card.back
     assert "繁體" not in card.back
+
+
+def test_jlpt_back_merges_pitch_pos_and_drops_duplicate_notes(tmp_path):
+    path = tmp_path / "jlpt-compact.apkg"
+    _write_jlpt_apkg(path, _jlpt_note(
+        VocabKanji="茄子", VocabPitch="①", VocabPoS="名",
+        VocabDefSC="茄子<br>果实", VocabPlus="茄子<br>果实",
+        SentFurigana1="彼[かれ]ら", SentDefSC1="他们",
+    ))
+    back = deck.load_deck(path)[0].back
+    assert back == "① 名 茄子 果实\n彼（かれ）ら\n他们"
+
+
+def test_jlpt_back_head_skips_empty_pitch_and_pos(tmp_path):
+    path = tmp_path / "jlpt-plain.apkg"
+    _write_jlpt_apkg(path, _jlpt_note(VocabKanji="茄子", VocabDefSC="茄子"))
+    assert deck.load_deck(path)[0].back == "茄子"
 
 
 def test_upload_resumes_from_device_offset(tmp_path):

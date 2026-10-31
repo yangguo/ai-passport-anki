@@ -324,15 +324,39 @@ def _take_field(fields: list[str], mapping: dict[str, int], name: str) -> str:
     return _clean_field(fields[index])
 
 
-def _fit_jlpt_back(parts: list[str]) -> str:
-    """parts: pitch, pos, definition, plus, sentence, sentence definition. Drop plus, then the sentence gloss."""
-    selected = list(parts)
-    for drop in (3, 5):
-        text = "\n".join(part for part in selected if part)
+def _inline(*parts: str) -> str:
+    """Collapse field whitespace so the head reads as one line before width wrapping."""
+    return " ".join(" ".join(part.split()) for part in parts if part)
+
+
+def _jlpt_back_lines(fields: list[str], mapping: dict[str, int]) -> list[str]:
+    """Official back order: pitch/part of speech/definition, notes, sentence, gloss.
+
+    The deck repeats the definition in VocabPlus, so an identical notes line is dropped.
+    """
+    pitch = _take_field(fields, mapping, "VocabPitch")
+    pos = _take_field(fields, mapping, "VocabPoS")
+    definition = _take_field(fields, mapping, "VocabDefSC")
+    plus = _take_field(fields, mapping, "VocabPlus")
+    if plus == definition:
+        plus = ""
+    return [
+        _inline(pitch, pos, definition),
+        plus,
+        _take_field(fields, mapping, "SentFurigana1"),
+        _take_field(fields, mapping, "SentDefSC1"),
+    ]
+
+
+def _fit_jlpt_back(lines: list[str]) -> str:
+    """Join back lines, dropping notes then the sentence gloss before failing."""
+    selected = list(lines)
+    for drop in (1, 3):
+        text = "\n".join(line for line in selected if line)
         if len(text.encode("utf-8")) <= MAX_TEXT_BYTES:
             return text
         selected[drop] = ""
-    text = "\n".join(part for part in selected if part)
+    text = "\n".join(line for line in selected if line)
     if len(text.encode("utf-8")) <= MAX_TEXT_BYTES:
         return text
     raise DeckError(f"back exceeds {MAX_TEXT_BYTES} bytes after dropping optional JLPT fields")
@@ -344,14 +368,7 @@ def _jlpt_sides(fields: list[str], mapping: dict[str, int], note_id: int) -> tup
     if not kanji:
         raise DeckError(f"JLPT note {note_id} has an empty VocabKanji field")
     front = f"{kanji}\n{furigana}" if furigana and furigana != kanji else kanji
-    back = _fit_jlpt_back([
-        _take_field(fields, mapping, "VocabPitch"),
-        _take_field(fields, mapping, "VocabPoS"),
-        _take_field(fields, mapping, "VocabDefSC"),
-        _take_field(fields, mapping, "VocabPlus"),
-        _take_field(fields, mapping, "SentFurigana1"),
-        _take_field(fields, mapping, "SentDefSC1"),
-    ])
+    back = _fit_jlpt_back(_jlpt_back_lines(fields, mapping))
     if not back:
         raise DeckError(f"JLPT note {note_id} has an empty back")
     return front, back
@@ -370,14 +387,7 @@ def _study_body_text(model: dict, fields: list[str], note_id: int) -> tuple[str,
         if not kanji:
             raise DeckError(f"JLPT note {note_id} has an empty VocabKanji field")
         front = f"{kanji}\n{furigana}" if furigana and furigana != kanji else kanji
-        back = "\n".join(part for part in [
-            _take_field(fields, mapping, "VocabPitch"),
-            _take_field(fields, mapping, "VocabPoS"),
-            _take_field(fields, mapping, "VocabDefSC"),
-            _take_field(fields, mapping, "VocabPlus"),
-            _take_field(fields, mapping, "SentFurigana1"),
-            _take_field(fields, mapping, "SentDefSC1"),
-        ] if part)
+        back = "\n".join(line for line in _jlpt_back_lines(fields, mapping) if line)
         if not back:
             raise DeckError(f"JLPT note {note_id} has an empty back")
         return front, back

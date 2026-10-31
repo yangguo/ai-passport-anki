@@ -333,8 +333,9 @@ static void sync_study_chrome(void) {
                                         lv_color_hex(selected ? 0xFFFFFF : 0xC8D0DA), 0);
         }
     }
-    lv_text_align_t body_align = card ? LV_TEXT_ALIGN_CENTER : LV_TEXT_ALIGN_LEFT;
-    lv_obj_set_style_text_align(body_label, body_align, 0);
+    /* Official card CSS is text-align:left; centering wasted the margins and
+     * left one-glyph lines (pitch marks) floating mid-panel. */
+    lv_obj_set_style_text_align(body_label, LV_TEXT_ALIGN_LEFT, 0);
     if (footer_panel) {
         lv_obj_set_style_bg_opa(footer_panel, card ? LV_OPA_70 : LV_OPA_TRANSP, 0);
     }

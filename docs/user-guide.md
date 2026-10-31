@@ -4,7 +4,7 @@
 
 电脑准备 UTF-8 TSV，第一行为四列：`id`、`deck`、`front`、`back`。每张卡 ID 唯一非零，多个相同 deck 名的卡归为同一牌组。最多 12,000 张、最多 64 个牌组、牌组名最多 47 UTF-8 字节、每面最多 511 UTF-8 字节。中文通常每字 3 字节，假名也是 3 字节。标准 TSV 引用字段可以包含换行。超出长度会报错，不会截断。
 
-从 Anki 导出文字时，优先采用 UTF-8 文本。旧式 Basic APKG 可转换。字段里带 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组（例如 [anki-jlpt-decks](https://github.com/5mdld/anki-jlpt-decks) 的 `eggrolls-JLPT10k-v3.5.apkg`）会取词条、假名、声调、词性和简体释义，并带上第一条例句；音频和图片丢弃，`汉字[假名]` 写成 `汉字（假名）`。Cloze、复杂模板不转换；`collection.anki21b`（zstd 压缩）已支持，多成员包优先用它。`--map out.json` 把设备上的 u32 ID 对应到 Anki 卡片 ID（JSON 里用字符串），这个文件是本地数据，不要提交进仓库。设备不上网，也不保存 Anki 的 64 位 ID。嵌套子牌组取末级名（如 `1-高频`），同名末级会合并。
+从 Anki 导出文字时，优先采用 UTF-8 文本。旧式 Basic APKG 可转换。字段里带 `VocabKanji`、`VocabFurigana`、`VocabDefSC` 的牌组（例如 [anki-jlpt-decks](https://github.com/5mdld/anki-jlpt-decks) 的 `eggrolls-JLPT10k-v3.5.apkg`）会取词条、假名和简体释义（背面首行是「声调 词性 释义」），并带上第一条例句；音频和图片丢弃，`汉字[假名]` 写成 `汉字（假名）`。Cloze、复杂模板不转换；`collection.anki21b`（zstd 压缩）已支持，多成员包优先用它。`--map out.json` 把设备上的 u32 ID 对应到 Anki 卡片 ID（JSON 里用字符串），这个文件是本地数据，不要提交进仓库。设备不上网，也不保存 Anki 的 64 位 ID。嵌套子牌组取末级名（如 `1-高频`），同名末级会合并。
 
 ```sh
 python3 tools/deck.py inspect decks/demo.tsv
@@ -18,7 +18,7 @@ python3 tools/deck.py inspect n3.apkg
 python3 tools/deck.py upload n3.apkg --port /dev/cu.usbmodem1101
 ```
 
-端口需使用自己电脑上实际设备路径。导入会整体替换设备卡片并重置复习历史，只有设备返回 `OK COMMIT` 才算成功。数据按最多 480 字节一块上传。中断后再次 upload 会从设备已经写好的位置继续；对不上时工具才 ABORT。COMMIT 可能要比单块更久，默认等待 120 秒。
+端口需使用自己电脑上实际设备路径。导入会整体替换设备卡片并重置复习历史，只有设备返回 `OK COMMIT` 才算成功。数据按 20 字节一块上传（约 53 字符一行，适配设备按 64 字节 USB 包切行）。中断后再次 upload 会从设备已经写好的位置继续；对不上时工具才 ABORT。COMMIT 可能要比单块更久，默认等待 120 秒。
 
 ## 从本机 Anki 取牌组
 
@@ -71,7 +71,7 @@ python3 tools/deck.py sync-back --map decks/local.map.json \
 
 牌组页是开机后的第一屏。按住 UP 约 0.5 秒（与 BSP 长按相同，不是 1.5 秒）会尝试回到 Cover Arts 启动器。其它画面的 UP 长按没有这个作用。屏幕上不另写返回提示。启动器缺失、已经在 factory 上运行、或校验失败时，留在本应用。复位或断电仍是回到启动器的通用办法。
 
-学习画面把正文放在标题和底栏之间，一页六行。问题用浅色字，答案用偏冷的字色。评分底栏是一行 `Again Hard [Good] Easy`，方括号标出当前档，颜色随档位变化。没有触摸操作。
+学习画面把正文放在标题和底栏之间，一页五行、左对齐（和官方牌组样式一致）。问题用浅色字，答案用偏冷的字色。评分底栏是一行 `Again Hard [Good] Easy`，方括号标出当前档，颜色随档位变化。没有触摸操作。
 
 Again 约一分钟后重新出现；学习步骤为1分钟和10分钟。到期卡优先于新卡。所有到期卡完成后显示完成状态，不会自动跳到下一天。
 
