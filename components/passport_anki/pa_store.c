@@ -659,6 +659,8 @@ static int deck_index(const pa_store *store, const char *deck)
     return -1;
 }
 
+static bool read_revlog_record(const pa_store *store, uint32_t rec_index, uint8_t out[PA_REVLOG_RECORD]);
+
 static bool read_record(const pa_store *store, uint16_t index, uint8_t out[PA_SCHED_RECORD])
 {
     if (index >= store->count) {
@@ -715,6 +717,66 @@ uint16_t pa_store_next(pa_store *store, const char *deck)
         }
     }
     return best;
+}
+
+void pa_store_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS])
+{
+    if (counts == NULL) {
+        return;
+    }
+    for (uint16_t i = 0; i < PA_STORE_MAX_DECKS; ++i) {
+        counts[i] = 0;
+    }
+    if (store == NULL || store->status != PA_STORE_READY || store->import_active) {
+        return;
+    }
+    uint16_t need = chunks_for(store->count);
+    for (uint16_t chunk = 0; chunk < need; ++chunk) {
+        if (!flash_read(store->sched, pool_offset(store->chunk_phys[chunk]), store->sector,
+                        PA_STORE_SECTOR)) {
+            return;
+        }
+        uint16_t records = rd_u16(store->sector + 18);
+        for (uint16_t n = 0; n < records; ++n) {
+            const uint8_t *rec = store->sector + PA_SCHED_HEADER + (uint32_t)n * PA_SCHED_RECORD;
+            uint8_t deck_id = rec[14];
+            if (deck_id >= store->deck_count) {
+                continue;
+            }
+            if (rd_u32(rec) <= store->now && counts[deck_id] < UINT16_MAX) {
+                counts[deck_id]++;
+            }
+        }
+    }
+}
+
+void pa_store_today_stats(pa_store *store, uint32_t by_rating[4], uint32_t *total)
+{
+    if (by_rating != NULL) {
+        for (int i = 0; i < 4; ++i) {
+            by_rating[i] = 0;
+        }
+    }
+    if (total != NULL) {
+        *total = 0;
+    }
+    if (store == NULL || by_rating == NULL || total == NULL || store->import_active ||
+        store->status != PA_STORE_READY || store->revlog_corrupt || store->epoch == 0) {
+        return;
+    }
+    uint32_t day_start = store->now - store->now % 1440u;
+    uint8_t rec[PA_REVLOG_RECORD];
+    for (uint32_t i = 0; i < store->revlog_count; ++i) {
+        if (!read_revlog_record(store, i, rec)) {
+            break;
+        }
+        uint32_t when = (uint32_t)rec[4] | ((uint32_t)rec[5] << 8) | ((uint32_t)rec[6] << 16) |
+                        ((uint32_t)rec[7] << 24);
+        if (when >= day_start && rec[2] <= PA_EASY) {
+            by_rating[rec[2]]++;
+            (*total)++;
+        }
+    }
 }
 
 bool pa_store_read(pa_store *store, uint16_t index, char *deck, size_t deck_cap, char *front,

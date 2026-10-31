@@ -137,6 +137,8 @@ const char *pa_store_deck_name(const pa_store *store, uint16_t index);
 bool pa_store_advance(pa_store *store, uint32_t minutes);
 bool pa_store_checkpoint(pa_store *store);
 uint16_t pa_store_next(pa_store *store, const char *deck);
+void pa_store_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS]);
+void pa_store_today_stats(pa_store *store, uint32_t by_rating[4], uint32_t *total);
 bool pa_store_read(pa_store *store, uint16_t index, char *deck, size_t deck_cap,
                    char *front, size_t front_cap, char *back, size_t back_cap);
 bool pa_store_grade(pa_store *store, uint16_t index, pa_rating rating);

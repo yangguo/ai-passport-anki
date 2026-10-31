@@ -444,6 +444,60 @@ static void test_region_plan_and_compact_slot(void)
     puts("store: compact region plan PASS");
 }
 
+static void test_due_counts(void)
+{
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store store;
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    uint8_t payload[128];
+    size_t length = append_card(payload, 0, 1, "A", "Q", "A");
+    length = append_card(payload, length, 2, "A", "Q2", "A2");
+    length = append_card(payload, length, 3, "B", "Q3", "A3");
+    assert(import_bytes(&store, payload, 3, (uint32_t)length));
+    uint16_t counts[PA_STORE_MAX_DECKS];
+    pa_store_due_counts(&store, counts);
+    assert(counts[0] == 2 && counts[1] == 1);
+    assert(pa_store_advance(&store, 10));
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    pa_store_due_counts(&store, counts);
+    assert(counts[0] == 1 && counts[1] == 1);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    puts("store: due counts PASS");
+}
+
+static void test_today_stats(void)
+{
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store store;
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    uint8_t payload[64];
+    size_t length = append_card(payload, 0, 7, "D", "Q", "A");
+    length = append_card(payload, length, 8, "D", "Q2", "A2");
+    assert(import_bytes(&store, payload, 2, (uint32_t)length));
+    assert(pa_store_grade(&store, 1, PA_EASY));
+    assert(pa_store_advance(&store, 3));
+    assert(pa_store_grade(&store, 0, PA_AGAIN));
+    uint32_t by[4] = {0, 0, 0, 0};
+    uint32_t total = 0;
+    pa_store_today_stats(&store, by, &total);
+    assert(total == 2 && by[PA_AGAIN] == 1 && by[PA_EASY] == 1);
+    assert(pa_store_advance(&store, 1440));
+    pa_store_today_stats(&store, by, &total);
+    assert(total == 0 && by[0] == 0 && by[3] == 0);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    puts("store: today stats PASS");
+}
+
 int main(void)
 {
     test_pack_vector();
@@ -453,5 +507,7 @@ int main(void)
     test_ten_thousand_and_heap();
     test_revlog_export_roundtrip();
     test_region_plan_and_compact_slot();
+    test_due_counts();
+    test_today_stats();
     return 0;
 }
