@@ -23,7 +23,9 @@
 #define PA_INDEX_BYTES (PA_STORE_MAX_CARDS * PA_INDEX_ENTRY)
 #define PA_INDEX_OFF PA_STORE_SECTOR
 #define PA_PAYLOAD_OFF (PA_INDEX_OFF + ((PA_INDEX_BYTES + PA_STORE_SECTOR - 1u) & ~(PA_STORE_SECTOR - 1u)))
-/* Factory stays 64 KiB-aligned at 0x50000. NVS stays 256 KiB so a legacy PAK1 blob can be read. */
+/* Full-collection windows used when the running partition's tail is at least
+ * this large. They are not partition-table entries. A Cover Arts slot is
+ * smaller and mounts the compact geometry instead. */
 #define PA_CARDS_PARTITION_SIZE 0x460000u
 #define PA_SCHED_PARTITION_SIZE 0xD0000u
 #define PA_STORE_SLOT_SIZE (PA_CARDS_PARTITION_SIZE / 2u)
@@ -78,6 +80,10 @@ typedef struct pa_store {
     uint16_t chunk_phys[PA_SCHED_CHUNKS];
     uint16_t erase_count[PA_POOL_CAP];
     uint16_t pool_count;
+    uint32_t payload_off;
+    uint16_t max_cards;
+    uint16_t revlog_sectors;
+    bool geometry_ok;
     uint8_t sector[PA_STORE_SECTOR];
     bool import_active;
     bool import_pending;
@@ -114,6 +120,13 @@ typedef struct {
 
 void pa_store_init(pa_store *store, pa_flash *cards, pa_flash *sched);
 pa_store_status pa_store_mount(pa_store *store);
+/* Structural card cap for the mounted windows. 0 until mount accepts the geometry. */
+uint16_t pa_store_capacity(const pa_store *store);
+/* Bytes of card payload the inactive slot can accept. 0 until geometry is known. */
+uint32_t pa_store_payload_limit(const pa_store *store);
+/* Split a post-image tail into cards and sched windows. Full tails keep the
+ * historical 0x460000 + 0xD0000 sizes. Smaller tails use a compact layout. */
+bool pa_region_plan(uint32_t data_size, uint32_t *cards_bytes, uint32_t *sched_bytes);
 uint16_t pa_store_count(const pa_store *store);
 uint32_t pa_store_now(const pa_store *store);
 uint16_t pa_store_deck_count(const pa_store *store);

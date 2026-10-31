@@ -23,8 +23,8 @@
 | 链接期 DRAM | 已用 224,234 / 可用 321,296，余 97,062 字节 | [acceptance.md](acceptance.md)；运行时 heap 仍为 NOT RUN |
 | 无线电 | 蓝牙关闭；注释写明 v1 不用 Wi-Fi。`main/CMakeLists.txt` 未依赖 `esp_wifi` | `sdkconfig.defaults` |
 | 屏幕 / 输入 | 240×320，GPIO0 上三个 ADC 按键 | [design.md](design.md) |
-| NVS | `0x9000/0x40000`（256 KiB），快照约 37 KiB | `partitions.csv`，[design.md](design.md) 第 11 节 |
-| factory | `0x50000/0x7b0000`（8,060,928 字节） | `partitions.csv` |
+| NVS | `0x9000/0x6000`（24 KiB）。更早的 256 KiB 测量已过时，安装布局见 [build.md](build.md) | `partitions.csv` |
+| factory（历史） | 曾记录 `0x50000/0x7b0000` | 旧测量，已被 stock 单 factory 取代 |
 | 当前 app | 2,144,528 字节；字体位图 1,162,067 字节 | [acceptance.md](acceptance.md)，`assets/fonts/README.md` |
 | 静态集合预算 | live 约 37 KiB + staging 约 37 KiB + codec 40 KiB；LVGL 池 24 KiB | [design.md](design.md) 第 13 节 |
 | 卡片 | 最多 64 张；`id` 为 u32；牌组名 ≤47 字节；正反面 ≤255 字节 | `tools/deck.py`，`passport_anki` |

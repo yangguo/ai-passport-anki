@@ -110,7 +110,12 @@ static uint32_t slot_base(const pa_store *store, uint8_t slot)
 static uint32_t payload_room(const pa_store *store)
 {
     uint32_t slot = store->cards->size / 2u;
-    return slot > PA_PAYLOAD_OFF ? slot - PA_PAYLOAD_OFF : 0u;
+    return slot > store->payload_off ? slot - store->payload_off : 0u;
+}
+
+static uint32_t revlog_capacity(const pa_store *store)
+{
+    return (uint32_t)store->revlog_sectors * PA_REVLOG_PER_SECTOR;
 }
 
 static uint16_t chunks_for(uint16_t count)
@@ -174,7 +179,7 @@ static bool read_super(pa_store *store, uint8_t slot, uint32_t *generation)
     }
     uint16_t count = rd_u16(block + 6);
     uint16_t decks = block[21];
-    if (count > PA_STORE_MAX_CARDS || decks > PA_STORE_MAX_DECKS || block[20] > 1u) {
+    if (count > store->max_cards || decks > PA_STORE_MAX_DECKS || block[20] > 1u) {
         return false;
     }
     store->count = count;
@@ -207,7 +212,7 @@ static bool load_decks(pa_store *store)
     uint32_t payload_len = rd_u32(header + 16);
     uint32_t payload_crc = rd_u32(header + 20);
     uint32_t index_crc = rd_u32(header + 24);
-    if (payload_len > payload_room(store)) {
+    if (rd_u32(header + 12) != store->payload_off || payload_len > payload_room(store)) {
         return false;
     }
     uint8_t names[PA_DECK_BYTES];
@@ -240,9 +245,9 @@ static bool load_decks(pa_store *store)
             uint16_t front_len = rd_u16(store->sector + i + 8);
             uint16_t back_len = rd_u16(store->sector + i + 10);
             uint32_t back_off = rd_u32(store->sector + i + 12);
-            uint32_t end = PA_PAYLOAD_OFF + payload_len;
+            uint32_t end = store->payload_off + payload_len;
             if (front_len == 0 || back_len == 0 || front_len > PA_STORE_TEXT_MAX || back_len > PA_STORE_TEXT_MAX ||
-                front_off < PA_PAYLOAD_OFF || back_off < PA_PAYLOAD_OFF ||
+                front_off < store->payload_off || back_off < store->payload_off ||
                 front_off > end - front_len || back_off > end - back_len) {
                 return false;
             }
@@ -260,7 +265,7 @@ static bool load_decks(pa_store *store)
         if (n > PA_STORE_SECTOR) {
             n = PA_STORE_SECTOR;
         }
-        if (!flash_read(store->cards, base + PA_PAYLOAD_OFF + done, store->sector, n)) {
+        if (!flash_read(store->cards, base + store->payload_off + done, store->sector, n)) {
             return false;
         }
         for (uint32_t i = 0; i < n; ++i) {
@@ -360,7 +365,7 @@ static bool load_progress(pa_store *store)
         uint32_t count = rd_u32(block + 8);
         uint32_t length = rd_u32(block + 16);
         uint32_t received = rd_u32(block + 20);
-        if (generation <= best_gen || count < 1 || count > PA_STORE_MAX_CARDS || length == 0 ||
+        if (generation <= best_gen || count < 1 || count > store->max_cards || length == 0 ||
             received > length || block[28] > 1u ||
             (received != length && (received % PA_STORE_SECTOR) != 0)) {
             continue;
@@ -380,6 +385,140 @@ static bool load_progress(pa_store *store)
 
 static void load_revlog(pa_store *store);
 static bool revlog_append(pa_store *store, uint16_t card_index, uint8_t rating);
+
+typedef struct {
+    uint32_t payload_off;
+    uint16_t max_cards;
+    uint16_t revlog_sectors;
+    uint16_t pool_count;
+    bool ok;
+} pa_geometry;
+
+static pa_geometry describe_sizes(uint32_t cards_size, uint32_t sched_size)
+{
+    pa_geometry best = {0};
+    if ((cards_size % (PA_STORE_SECTOR * 2u)) != 0 || cards_size < PA_STORE_SECTOR * 2u ||
+        (sched_size % PA_STORE_SECTOR) != 0) {
+        return best;
+    }
+    if (cards_size == PA_CARDS_PARTITION_SIZE && sched_size == PA_SCHED_PARTITION_SIZE) {
+        best.payload_off = PA_PAYLOAD_OFF;
+        best.max_cards = (uint16_t)PA_STORE_MAX_CARDS;
+        best.revlog_sectors = (uint16_t)PA_REVLOG_SECTORS;
+        best.pool_count = (uint16_t)PA_SCHED_POOL_SECTORS;
+        best.ok = true;
+        return best;
+    }
+    uint32_t slot = cards_size / 2u;
+    uint32_t sectors = sched_size / PA_STORE_SECTOR;
+    if (sectors < PA_META_SECTORS + 2u) {
+        return best;
+    }
+    uint32_t remaining = sectors - PA_META_SECTORS;
+    bool found = false;
+    for (uint32_t off = PA_INDEX_OFF + PA_STORE_SECTOR; off + 11u <= slot; off += PA_STORE_SECTOR) {
+        uint32_t index_bytes = off - PA_INDEX_OFF;
+        uint32_t by_index = index_bytes / PA_INDEX_ENTRY;
+        if (by_index > PA_STORE_MAX_CARDS) {
+            by_index = PA_STORE_MAX_CARDS;
+        }
+        uint32_t room = slot - off;
+        uint32_t by_payload = room / 11u;
+        uint32_t structural = by_index < by_payload ? by_index : by_payload;
+        if (structural > PA_STORE_MAX_CARDS) {
+            structural = PA_STORE_MAX_CARDS;
+        }
+        if (structural < 1u) {
+            continue;
+        }
+        uint32_t chunks_needed = (structural + PA_SCHED_PER_CHUNK - 1u) / PA_SCHED_PER_CHUNK;
+        if (chunks_needed > PA_SCHED_CHUNKS) {
+            chunks_needed = PA_SCHED_CHUNKS;
+        }
+        uint32_t pool_needed = chunks_needed * 2u;
+        uint32_t pool_cap = remaining > PA_POOL_CAP ? PA_POOL_CAP : remaining;
+        uint32_t pool;
+        uint32_t revlog;
+        if (pool_needed <= pool_cap) {
+            pool = pool_needed;
+        } else {
+            pool = pool_cap & ~1u;
+            if (pool < 2u) {
+                continue;
+            }
+        }
+        revlog = remaining - pool;
+        uint32_t by_sched = (pool / 2u) * PA_SCHED_PER_CHUNK;
+        if (by_sched > PA_STORE_MAX_CARDS) {
+            by_sched = PA_STORE_MAX_CARDS;
+        }
+        uint32_t max_cards = structural < by_sched ? structural : by_sched;
+        if (max_cards < 1u || max_cards > UINT16_MAX || revlog > UINT16_MAX || pool > UINT16_MAX) {
+            continue;
+        }
+        bool better = !found || max_cards > best.max_cards ||
+                      (max_cards == best.max_cards && revlog > best.revlog_sectors) ||
+                      (max_cards == best.max_cards && revlog == best.revlog_sectors &&
+                       room > slot - best.payload_off);
+        if (better) {
+            found = true;
+            best.payload_off = off;
+            best.max_cards = (uint16_t)max_cards;
+            best.revlog_sectors = (uint16_t)revlog;
+            best.pool_count = (uint16_t)pool;
+            best.ok = true;
+        }
+        if (by_index >= PA_STORE_MAX_CARDS) {
+            break;
+        }
+    }
+    return best;
+}
+
+bool pa_region_plan(uint32_t data_size, uint32_t *cards_bytes, uint32_t *sched_bytes)
+{
+    if (cards_bytes == NULL || sched_bytes == NULL) {
+        return false;
+    }
+    if (data_size >= PA_CARDS_PARTITION_SIZE + PA_SCHED_PARTITION_SIZE) {
+        *cards_bytes = PA_CARDS_PARTITION_SIZE;
+        *sched_bytes = PA_SCHED_PARTITION_SIZE;
+        return true;
+    }
+    bool found = false;
+    uint16_t best_cards = 0;
+    uint16_t best_revlog = 0;
+    uint32_t best_cards_bytes = 0;
+    uint32_t best_sched = 0;
+    for (uint32_t cards = PA_STORE_SECTOR * 2u; cards < data_size; cards += PA_STORE_SECTOR * 2u) {
+        uint32_t sched_room = data_size - cards;
+        sched_room -= sched_room % PA_STORE_SECTOR;
+        if (sched_room < (PA_META_SECTORS + 2u) * PA_STORE_SECTOR) {
+            continue;
+        }
+        pa_geometry geo = describe_sizes(cards, sched_room);
+        if (!geo.ok) {
+            continue;
+        }
+        bool better = !found || geo.max_cards > best_cards ||
+                      (geo.max_cards == best_cards && geo.revlog_sectors > best_revlog) ||
+                      (geo.max_cards == best_cards && geo.revlog_sectors == best_revlog &&
+                       cards > best_cards_bytes);
+        if (better) {
+            found = true;
+            best_cards = geo.max_cards;
+            best_revlog = geo.revlog_sectors;
+            best_cards_bytes = cards;
+            best_sched = sched_room;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    *cards_bytes = best_cards_bytes;
+    *sched_bytes = best_sched;
+    return true;
+}
 
 void pa_store_init(pa_store *store, pa_flash *cards, pa_flash *sched)
 {
@@ -407,19 +546,25 @@ pa_store_status pa_store_mount(pa_store *store)
     store->super_slot = 0;
     store->active_slot = 0;
     clear_chunk_map(store);
-    if (store->cards == NULL || store->sched == NULL ||
-        (store->cards->size % (PA_STORE_SECTOR * 2u)) != 0 || store->cards->size < PA_STORE_SECTOR * 2u ||
-        (store->sched->size % PA_STORE_SECTOR) != 0) {
+    store->geometry_ok = false;
+    store->payload_off = 0;
+    store->max_cards = 0;
+    store->revlog_sectors = 0;
+    store->pool_count = 0;
+    if (store->cards != NULL && store->sched != NULL) {
+        pa_geometry geo = describe_sizes(store->cards->size, store->sched->size);
+        if (geo.ok) {
+            store->geometry_ok = true;
+            store->payload_off = geo.payload_off;
+            store->max_cards = geo.max_cards;
+            store->revlog_sectors = geo.revlog_sectors;
+            store->pool_count = geo.pool_count;
+        }
+    }
+    if (!store->geometry_ok) {
         store->status = PA_STORE_CORRUPT;
         return store->status;
     }
-    uint32_t sectors = store->sched->size / PA_STORE_SECTOR;
-    if (sectors < PA_META_SECTORS + PA_SCHED_CHUNKS * 2u + PA_REVLOG_SECTORS ||
-        sectors - PA_META_SECTORS - PA_REVLOG_SECTORS > PA_POOL_CAP || payload_room(store) < 1024u) {
-        store->status = PA_STORE_CORRUPT;
-        return store->status;
-    }
-    store->pool_count = (uint16_t)(sectors - PA_META_SECTORS - PA_REVLOG_SECTORS);
     uint32_t gen0 = 0, gen1 = 0;
     bool ok0 = read_super(store, 0, &gen0);
     uint32_t now0 = store->now, epoch0 = store->epoch;
@@ -463,6 +608,20 @@ pa_store_status pa_store_mount(pa_store *store)
 uint16_t pa_store_count(const pa_store *store) { return store->count; }
 uint32_t pa_store_now(const pa_store *store) { return store->now; }
 uint16_t pa_store_deck_count(const pa_store *store) { return store->deck_count; }
+
+uint16_t pa_store_capacity(const pa_store *store)
+{
+    return store != NULL && store->geometry_ok ? store->max_cards : 0u;
+}
+
+uint32_t pa_store_payload_limit(const pa_store *store)
+{
+    if (store == NULL || !store->geometry_ok) {
+        return 0u;
+    }
+    uint32_t room = payload_room(store);
+    return room > PA_STORE_PAYLOAD_MAX ? PA_STORE_PAYLOAD_MAX : room;
+}
 
 const char *pa_store_deck_name(const pa_store *store, uint16_t index)
 {
@@ -725,7 +884,7 @@ static void load_revlog(pa_store *store)
         return;
     }
     uint32_t expect = 0;
-    for (uint16_t i = 0; i < PA_REVLOG_SECTORS; ++i) {
+    for (uint16_t i = 0; i < store->revlog_sectors; ++i) {
         uint32_t offset = pool_offset((uint16_t)(store->pool_count + i));
         if (!flash_read(store->sched, offset, store->sector, PA_STORE_SECTOR)) {
             store->revlog_corrupt = true;
@@ -755,11 +914,14 @@ static void load_revlog(pa_store *store)
 
 static bool revlog_append(pa_store *store, uint16_t card_index, uint8_t rating)
 {
-    if (store->revlog_corrupt || store->epoch == 0 || store->revlog_count >= PA_REVLOG_MAX ||
-        card_index >= store->count || rating > PA_EASY) {
+    if (store->revlog_sectors == 0 || store->revlog_corrupt || store->epoch == 0 ||
+        store->revlog_count >= revlog_capacity(store) || card_index >= store->count || rating > PA_EASY) {
         return false;
     }
     uint16_t sector_index = (uint16_t)(store->revlog_count / PA_REVLOG_PER_SECTOR);
+    if (sector_index >= store->revlog_sectors) {
+        return false;
+    }
     uint16_t slot = (uint16_t)(store->revlog_count % PA_REVLOG_PER_SECTOR);
     uint32_t offset = pool_offset((uint16_t)(store->pool_count + sector_index));
     uint32_t base = (uint32_t)sector_index * PA_REVLOG_PER_SECTOR;
@@ -879,8 +1041,8 @@ static uint8_t staging_slot(const pa_store *store)
 
 bool pa_store_import_begin(pa_store *store, uint32_t count, uint32_t crc, uint32_t length, uint32_t *resume)
 {
-    if (store == NULL || resume == NULL || count < 1 ||
-        count > PA_STORE_MAX_CARDS || length < count * 11u || length > payload_room(store) ||
+    if (store == NULL || resume == NULL || !store->geometry_ok || count < 1 ||
+        count > store->max_cards || length < count * 11u || length > payload_room(store) ||
         length > PA_STORE_PAYLOAD_MAX) {
         return false;
     }
@@ -916,7 +1078,7 @@ static bool flush_assembly(pa_store *store)
     if (store->import_asm == 0) {
         return true;
     }
-    uint32_t offset = slot_base(store, store->import_slot) + PA_PAYLOAD_OFF + store->import_durable;
+    uint32_t offset = slot_base(store, store->import_slot) + store->payload_off + store->import_durable;
     if ((offset % PA_STORE_SECTOR) != 0 ||
         !flash_erase_write(store->cards, offset, store->sector, store->import_asm)) {
         return false;
@@ -985,7 +1147,7 @@ void pa_store_import_abort(pa_store *store)
 static bool read_payload(pa_store *store, uint32_t offset, uint8_t *dst, uint32_t length, uint32_t *crc)
 {
     if (offset + length > store->import_length ||
-        !flash_read(store->cards, slot_base(store, store->import_slot) + PA_PAYLOAD_OFF + offset, dst, length)) {
+        !flash_read(store->cards, slot_base(store, store->import_slot) + store->payload_off + offset, dst, length)) {
         return false;
     }
     for (uint32_t i = 0; i < length; ++i) {
@@ -1137,8 +1299,8 @@ bool pa_store_import_commit(pa_store *store, pa_store_text_fn text_ok, void *use
             break;
         }
         ids[i] = id;
-        uint32_t front_off = PA_PAYLOAD_OFF + (cursor - back_len - front_len);
-        uint32_t back_off = PA_PAYLOAD_OFF + (cursor - back_len);
+        uint32_t front_off = store->payload_off + (cursor - back_len - front_len);
+        uint32_t back_off = store->payload_off + (cursor - back_len);
         uint8_t ent[PA_INDEX_ENTRY];
         wr_u32(ent, id);
         wr_u32(ent + 4, front_off);
@@ -1273,7 +1435,7 @@ bool pa_store_import_commit(pa_store *store, pa_store_text_fn text_ok, void *use
     wr_u16(store->sector + 4, 1);
     wr_u16(store->sector + 6, (uint16_t)count32);
     wr_u32(store->sector + 8, new_epoch);
-    wr_u32(store->sector + 12, PA_PAYLOAD_OFF);
+    wr_u32(store->sector + 12, store->payload_off);
     wr_u32(store->sector + 16, store->import_length);
     wr_u32(store->sector + 20, store->import_crc);
     wr_u32(store->sector + 24, index_crc ^ 0xffffffffu);

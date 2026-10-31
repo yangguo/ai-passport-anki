@@ -218,6 +218,18 @@ def test_upload_rejects_unknown_device_protocol_version(tmp_path):
     assert serial.writes == ["INFO"]
 
 
+def test_upload_rejects_deck_larger_than_device_cap(tmp_path):
+    path = tmp_path / "cards.tsv"
+    path.write_text(
+        "id\tdeck\tfront\tback\n1\tD\tQ\tA\n2\tD\tQ2\tA2\n",
+        encoding="utf-8",
+    )
+    serial = FakeSerial(["OK INFO version=2 cards=0 day=0 cap=1"])
+    with pytest.raises(deck.DeckError, match="capacity is 1"):
+        deck.upload(path, port="fake", serial_factory=lambda *a, **k: serial)
+    assert serial.writes == ["INFO"]
+
+
 def test_jlpt_model_strips_media_and_expands_furigana(tmp_path):
     path = tmp_path / "jlpt.apkg"
     db_path = tmp_path / "jlpt.sqlite"

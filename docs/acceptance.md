@@ -43,6 +43,19 @@
 
 未执行刷写、擦除或设备修改。固件编译或主机测试通过不能替代真机验收。
 
+## Cover Arts 槽与学习画面（2026-10-31）
+
+本地证据，不是设备验收。
+
+| 项目 | 当前状态 | 证据 |
+|---|---|---|
+| 主机 CTest（ASan+UBSan） | PASS | `cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON` 后 CTest 8/8：core、codec、store、layout、cover、protocol、import、font_config。store 覆盖满窗口 10,000 张、60 KiB 槽规划（cap 256、payload 4096）、无复习日志时评分仍成功且 `dropped` 加一 |
+| Python | PASS | pytest 48：`test_deck.py`、`test_anki_sync.py`、`test_simulator.py`、`test_image_pad.py`。上传在 `cap` 小于牌组时于 `BEGIN` 前拒绝 |
+| ESP32-C3 编译 / 补齐 / 分区 | PASS | 本机 ESP-IDF 5.5.3 `tools/validate_firmware.sh`。补齐后应用镜像 2,232,320 字节，`length % 65536 = 4096`；factory `0x7F0000`，尾部 6,090,752 字节，大于 12,000 张窗口 `0x530000`。链接期 DRAM 116,186 / 321,296，剩余 205,110。未把镜像刷到设备 |
+| 真机：Cover Arts 安装、槽内读写、返回启动器、六行学习画面 | NOT RUN | 未刷写、未在启动器里安装、未看屏幕 |
+
+槽内结构上限是 256 张、每槽 4096 字节正文、复习日志 1 个扇区。这不是 12,000 张，也不是一份 JLPT 万词牌能放进槽里的承诺。独立 factory 尾部仍使用原来的 `0x460000` + `0xD0000`。上面旧的 CI 镜像哈希对应当时的分区表，不能拿来核对这一版 `app.bin`。
+
 ## M6 桌面模拟器本地验收（2026-10-11）
 
 - 工作目录：`/Users/vyang/Desktop/spaces/ai-passport-anki`；编码由 Luna high 完成。

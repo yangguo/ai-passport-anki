@@ -6,6 +6,11 @@
 #include <stdint.h>
 
 #define PA_LAYOUT_MAX_PAGES 64
+/* Study body on the 240x320 panel. pa_font_16 is 31 px per line, so six lines
+ * fill the area under a one-line title and above a one-line footer. 204 is the
+ * label width at x = 18 inside the rounded bezel. */
+#define PA_STUDY_TEXT_WIDTH 204
+#define PA_STUDY_TEXT_LINES 6
 typedef uint16_t (*pa_glyph_width_fn)(uint32_t codepoint, void *user);
 typedef struct { uint16_t start, length; } pa_text_page;
 

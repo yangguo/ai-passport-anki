@@ -562,7 +562,13 @@ def upload(filename: str | Path, port: str, *, day: int | None = None,
     serial_port = factory(port, baudrate, command_timeout) if serial_factory is None else factory(port, baudrate=baudrate, timeout=max(command_timeout, commit_timeout))
     transaction_started = False
     try:
-        _exchange(serial_port, "INFO", "INFO", command_timeout)
+        info = _exchange(serial_port, "INFO", "INFO", command_timeout)
+        info_match = re.fullmatch(r"OK INFO version=(\d+) cards=(\d+) day=(\d+) cap=(\d+)", info)
+        if info_match is None:
+            raise DeckError(f"unrecognized info reply: {info}")
+        device_cap = int(info_match.group(4))
+        if len(cards) > device_cap:
+            raise DeckError(f"deck has {len(cards)} cards; device capacity is {device_cap}")
         if day is not None:
             if not isinstance(day, int) or isinstance(day, bool) or not 0 <= day <= UINT32_MAX // 1440:
                 raise DeckError("day must be in range 0..2982616")
