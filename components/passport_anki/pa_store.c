@@ -840,6 +840,82 @@ void pa_store_new_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS
     }
 }
 
+void pa_store_forecast(pa_store *store, uint16_t buckets[3])
+{
+    if (buckets != NULL) {
+        buckets[0] = 0;
+        buckets[1] = 0;
+        buckets[2] = 0;
+    }
+    if (store == NULL || store->status != PA_STORE_READY || store->import_active ||
+        buckets == NULL) {
+        return;
+    }
+    uint16_t need = chunks_for(store->count);
+    for (uint16_t chunk = 0; chunk < need; ++chunk) {
+        if (!flash_read(store->sched, pool_offset(store->chunk_phys[chunk]), store->sector,
+                        PA_STORE_SECTOR)) {
+            return;
+        }
+        uint16_t records = rd_u16(store->sector + 18);
+        for (uint16_t n = 0; n < records; ++n) {
+            const uint8_t *rec = store->sector + PA_SCHED_HEADER + (uint32_t)n * PA_SCHED_RECORD;
+            if (rec[14] >= store->deck_count) {
+                continue;
+            }
+            uint32_t due = rd_u32(rec);
+            if (due <= store->now) {
+                continue;
+            }
+            uint32_t delta = due - store->now;
+            unsigned bucket = delta <= 1440u ? 0u : delta <= 2880u ? 1u : delta <= 4320u ? 2u : 3u;
+            if (bucket < 3 && buckets[bucket] < UINT16_MAX) {
+                buckets[bucket]++;
+            }
+        }
+    }
+}
+
+bool pa_store_earliest_due(pa_store *store, const char *deck, uint32_t *due_out)
+{
+    if (due_out != NULL) {
+        *due_out = 0;
+    }
+    if (store == NULL || store->status != PA_STORE_READY || store->import_active ||
+        deck == NULL || due_out == NULL) {
+        return false;
+    }
+    int deck_id = deck_index(store, deck);
+    if (deck_id < 0) {
+        return false;
+    }
+    bool found = false;
+    uint32_t best = 0;
+    uint16_t need = chunks_for(store->count);
+    for (uint16_t chunk = 0; chunk < need; ++chunk) {
+        if (!flash_read(store->sched, pool_offset(store->chunk_phys[chunk]), store->sector,
+                        PA_STORE_SECTOR)) {
+            return false;
+        }
+        uint16_t records = rd_u16(store->sector + 18);
+        for (uint16_t n = 0; n < records; ++n) {
+            const uint8_t *rec = store->sector + PA_SCHED_HEADER + (uint32_t)n * PA_SCHED_RECORD;
+            if (rec[14] != (uint8_t)deck_id) {
+                continue;
+            }
+            uint32_t due = rd_u32(rec);
+            if (due > store->now && (!found || due < best)) {
+                best = due;
+                found = true;
+            }
+        }
+    }
+    if (found) {
+        *due_out = best;
+    }
+    return found;
+}
+
 void pa_store_set_limits(pa_store *store, uint8_t new_limit, uint16_t new_done)
 {
     if (store == NULL) {

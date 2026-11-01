@@ -622,6 +622,47 @@ static void test_shuffle_within_priority(void)
     puts("store: shuffle within priority PASS");
 }
 
+static void test_forecast_and_earliest(void)
+{
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store store;
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    uint8_t payload[64];
+    size_t length = append_card(payload, 0, 1, "D", "Q", "A");
+    length = append_card(payload, length, 2, "D", "Q2", "A2");
+    assert(import_bytes(&store, payload, 2, (uint32_t)length));
+    /* idx0 NEW+Good -> LEARNING s1 due=10. idx1 NEW+Good -> LEARNING s1 due=10. */
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    assert(pa_store_grade(&store, 1, PA_GOOD));
+    /* advance(10): now=10. idx1 +Good -> REVIEW I=1 due=1450. */
+    assert(pa_store_advance(&store, 10));
+    assert(pa_store_grade(&store, 1, PA_GOOD));
+    /* advance(1440): now=1450. idx1 +Hard -> I=max(2,ceil(1.2))=2, due=4330. */
+    assert(pa_store_advance(&store, 1440));
+    assert(pa_store_grade(&store, 1, PA_HARD));
+    /* idx0 +Good at now=1450: LEARNING s1 -> REVIEW I=1, due=2890. */
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    uint16_t buckets[3] = {9, 9, 9};
+    pa_store_forecast(&store, buckets);
+    /* now=1450: idx0 due=2890 -> bucket0; idx1 due=4330 -> bucket1. */
+    assert(buckets[0] == 1 && buckets[1] == 1 && buckets[2] == 0);
+    uint32_t earliest = 0;
+    assert(pa_store_earliest_due(&store, "D", &earliest) && earliest == 2890);
+    assert(!pa_store_earliest_due(&store, "missing", &earliest));
+    assert(!pa_store_earliest_due(&store, "D", NULL));
+    assert(!pa_store_earliest_due(NULL, "D", &earliest));
+    /* NULL store zeroes buckets (same convention as the due-count queries). */
+    pa_store_forecast(NULL, buckets);
+    assert(buckets[0] == 0 && buckets[1] == 0 && buckets[2] == 0);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    puts("store: forecast and earliest due PASS");
+}
+
 int main(void)
 {
     test_pack_vector();
@@ -636,5 +677,6 @@ int main(void)
     test_limits_and_is_new();
     test_new_limit_skip();
     test_shuffle_within_priority();
+    test_forecast_and_earliest();
     return 0;
 }
