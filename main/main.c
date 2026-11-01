@@ -77,7 +77,7 @@ static uint8_t setting_autopage_sec = 0;
 static int64_t page_shown_us;
 static bool battery_usable = false;
 static bool screen_dimmed = false;
-static int64_t last_activity_us, dim_start_us;
+static int64_t last_activity_us, dim_start_us, last_usb_line_us;
 static lv_obj_t *title_label, *body_label, *footer_label;
 static lv_obj_t *header_rule, *footer_panel, *grade_chip[4], *grade_chip_label[4];
 
@@ -759,18 +759,42 @@ static void idle_callback(void *arg) {
 }
 
 /* Two-stage auto sleep: dim first (clock keeps running), deep sleep 5 min later.
- * Any button wakes from dim and consumes the press; USB input wakes too. */
-#define IDLE_US (10LL * 1000 * 1000)
+ * Any button wakes from dim and consumes the press; USB input wakes too.
+ * IDLE_US is 1s so auto page turn (3s minimum) fires on time; sleep uses
+ * minute-granularity timestamps so the 1s tick does not dim early. */
+#define IDLE_US (1LL * 1000 * 1000)
 #define DEEP_SLEEP_AFTER_DIM_US (5LL * 60 * 1000 * 1000)
+/* USB Serial/JTAG has no VBUS sense pin on this board, so "connected" is
+ * inferred from line traffic: any received line within this window blocks
+ * dim/deep sleep. Import already inhibits sleep via store.import_active;
+ * this covers an idle-but-plugged console (e.g. sitting at a shell). */
+#define USB_ACTIVITY_WINDOW_US (30LL * 1000 * 1000)
 
 static void note_activity(int64_t now)
 {
     last_activity_us = now;
 }
 
+static bool usb_recently_active(int64_t now)
+{
+    return last_usb_line_us != 0 && now - last_usb_line_us < USB_ACTIVITY_WINDOW_US;
+}
+
 static void check_idle_sleep(int64_t now)
 {
     if (store.import_active || !storage_ready || storage_corrupt) return;
+    if (usb_recently_active(now)) {
+        /* Plugged into a host console: stay awake so INFO/协议交互不断背光。
+         * No VBUS sense on this board; any line within the window counts. */
+        if (screen_dimmed) {
+            screen_dimmed = false;
+            bsp_display_backlight(setting_brightness);
+            render();
+        }
+        last_activity_us = now;
+        dim_start_us = now;
+        return;
+    }
     if (!screen_dimmed) {
         if (now - last_activity_us >= (int64_t)setting_sleep_min * 60 * 1000 * 1000) {
             screen_dimmed = true;
@@ -934,7 +958,9 @@ static void app_task(void *arg) {
             }
         }
         else if (event.type == EVENT_LINE) {
-            note_activity(esp_timer_get_time());
+            int64_t line_now = esp_timer_get_time();
+            note_activity(line_now);
+            last_usb_line_us = line_now;
             handle_line(event.line);
             if (ui != UI_ERROR && ui != UI_IMPORTING) render();
         } else if (event.type == EVENT_TICK) {
