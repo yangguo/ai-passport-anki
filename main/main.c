@@ -437,6 +437,12 @@ static void sync_study_chrome(void) {
     }
 }
 
+/* Forward declarations: defined before do_grade, called from handle_line. */
+static void study_day_sync(void);
+static void study_day_reset(void);
+static bool study_has_due(void);
+static bool autoplay_scope_earliest(uint32_t *due_out);
+
 /* Remaining today in scope: (LEARNING+REVIEW due) + NEW within budget. */
 static void study_remaining(bool all, uint16_t deck, uint16_t *x_out, uint16_t *y_out)
 {
@@ -504,7 +510,6 @@ static void render(void) {
         static uint16_t due[PA_STORE_MAX_DECKS];
         if (deck_index == 0 && count > 0) {
             uint32_t by_rating[4] = {0, 0, 0, 0}, today_total = 0;
-            pa_store_due_counts(&store, due);
             pa_store_today_stats(&store, by_rating, &today_total);
             uint16_t remain_x = 0, remain_y = 0, forecast[3] = {0, 0, 0};
             study_remaining(true, 0, &remain_x, &remain_y);
@@ -694,12 +699,6 @@ draw_labels:
     lv_label_set_text(footer_label, footer);
     bsp_lvgl_unlock();
 }
-
-/* Forward declarations: defined before do_grade, called from handle_line. */
-static void study_day_sync(void);
-static void study_day_reset(void);
-static bool study_has_due(void);
-static bool autoplay_scope_earliest(uint32_t *due_out);
 
 static void abort_import(void) {
     pa_store_import_abort(&store);
