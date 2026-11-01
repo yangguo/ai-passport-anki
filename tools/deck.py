@@ -23,12 +23,11 @@ MAX_DECKS = 64
 MAX_DECK_BYTES = 47
 MAX_TEXT_BYTES = 511
 MAX_LINE_BYTES = 1200
-# Device console consumes USB serial per ~64B packet without stream reassembly,
-# so any command line over ~64 chars fragments into ERR LINE. CHUNK lines must
-# stay well below 64 chars: "CHUNK <off> " prefix (up to 13 chars at 6-digit
-# offsets) plus hex payload. 20 data bytes -> 40 hex chars -> at most
-# ~53-char lines with solid margin for USB packet-boundary jitter.
-MAX_CHUNK_BYTES = 20
+# Device console reassembles USB Serial/JTAG packets until '\n', so CHUNK lines
+# may use the full 480-byte protocol chunk: "CHUNK <off> " prefix (up to 13
+# chars at 6-digit offsets) plus 960 hex chars stays under MAX_LINE_BYTES.
+# n3 (268245B) drops from 13413 round-trips at 20B to 559 at 480B.
+MAX_CHUNK_BYTES = 480
 UINT32_MAX = 0xFFFFFFFF
 PROTOCOL_VERSION = 2
 _INFO_REPLY = re.compile(r"OK INFO version=(\d+) cards=(\d+) day=(\d+) cap=(\d+) room=(\d+)")

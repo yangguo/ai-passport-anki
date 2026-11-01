@@ -18,7 +18,7 @@ python3 tools/deck.py inspect n3.apkg
 python3 tools/deck.py upload n3.apkg --port /dev/cu.usbmodem1101
 ```
 
-端口需使用自己电脑上实际设备路径。导入会整体替换设备卡片并重置复习历史，只有设备返回 `OK COMMIT` 才算成功。数据按 20 字节一块上传（约 53 字符一行，适配设备按 64 字节 USB 包切行）。中断后再次 upload 会从设备已经写好的位置继续；对不上时工具才 ABORT。COMMIT 可能要比单块更久，默认等待 120 秒。
+端口需使用自己电脑上实际设备路径。导入会整体替换设备卡片并重置复习历史，只有设备返回 `OK COMMIT` 才算成功。数据按 480 字节一块上传（约 973 字符一行，设备按字节拼包直到换行）。中断后再次 upload 会从设备已经写好的位置继续；对不上时工具才 ABORT。COMMIT 可能要比单块更久，默认等待 120 秒。
 
 ## 从本机 Anki 取牌组
 

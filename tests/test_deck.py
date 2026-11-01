@@ -82,8 +82,10 @@ def test_commands_are_hex_encoded_bounded_and_finish_with_commit(tmp_path):
     assert commands[-1] == "COMMIT"
     assert payload[4:9] == bytes([len("中文".encode()), 6, 0, 6, 0])
     assert all(len(line.encode("ascii")) <= deck.MAX_LINE_BYTES for line in commands)
-    # Device console fragments lines over ~64 chars (no USB stream reassembly).
-    assert all(len(line.encode("ascii")) <= 60 for line in commands)
+    # Device console reassembles USB packets until newline; CHUNK lines may use
+    # the full 480-byte protocol chunk (prefix + 960 hex chars < 1200).
+    assert deck.MAX_CHUNK_BYTES == 480
+    assert all(len(line.split(" ", 2)[2]) // 2 <= deck.MAX_CHUNK_BYTES for line in chunks)
 
 
 def test_command_stream_rejects_embedded_nul_and_unsupported_glyph(tmp_path):

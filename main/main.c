@@ -597,7 +597,10 @@ static void handle_line(char *line) {
             render();
             return;
         }
-        render();
+        /* Import streams hundreds of chunks; redrawing the LVGL progress text
+         * per chunk stalls the USB reader. The UI_IMPORTING screen already
+         * shows durable progress on BEGIN/COMMIT/RESUME/phase changes, which
+         * is frequent enough for a headless bulk transfer. */
         printf("OK CHUNK %" PRIu32 "\n", accepted);
         fflush(stdout);
         return;
@@ -701,20 +704,46 @@ static void button_callback(bsp_btn_t button, bsp_btn_ev_t ev, void *user) {
     (void)xQueueSend(events, &button_event_storage, 0);
 }
 
+/* USB Serial/JTAG delivers ~64B packets. The old fgets-per-packet reader
+ * treated each packet as a line, so any command over ~64 chars fragmented
+ * into ERR LINE and the host had to shrink CHUNK to 20 bytes (13413
+ * round-trips for n3). Reassemble bytes until '\n' so the host can use the
+ * full 480-byte protocol chunk (~974-char lines, still under PA_LINE_MAX). */
 static void console_reader(void *arg) {
     (void)arg;
+    static char staging[PA_LINE_MAX + 2];
+    size_t used = 0;
+    bool discarding = false;
     event_t event = {.type = EVENT_LINE};
     for (;;) {
-        if (!fgets(event.line, sizeof(event.line), stdin)) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
-        size_t n = strlen(event.line);
-        if (!n || event.line[n - 1] != '\n') {
-            int ch;
-            while ((ch = getchar()) != '\n' && ch != EOF) {}
-            reply_error("LINE"); continue;
+        int ch = getchar();
+        if (ch == EOF) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+        if (ch != '\n') {
+            if (!discarding) {
+                /* Cap content at PA_LINE_MAX chars (old fgets path replied
+                 * LINE above 1200); the parser still rejects >1200. */
+                if (used < (size_t)PA_LINE_MAX) {
+                    staging[used++] = (char)ch;
+                } else {
+                    discarding = true;
+                }
+            }
+            continue;
         }
-        if (n > PA_LINE_MAX + 1) { reply_error("LINE"); continue; }
-        event.line[n - 1] = '\0';
-        if (n >= 2 && event.line[n - 2] == '\r') event.line[n - 2] = '\0';
+        if (discarding) {
+            discarding = false;
+            used = 0;
+            reply_error("LINE");
+            continue;
+        }
+        /* Match the old fgets path: strip one trailing '\r' only. Interior
+         * '\r' stays in the line so the protocol parser rejects it. */
+        if (used > 0 && staging[used - 1u] == '\r') {
+            --used;
+        }
+        staging[used] = '\0';
+        memcpy(event.line, staging, used + 1u);
+        used = 0;
         if (xQueueSend(events, &event, 0) != pdTRUE) reply_error("BUSY");
     }
 }
