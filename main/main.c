@@ -74,6 +74,13 @@ static const char *last_error = "";
 static uint8_t setting_brightness = 70;
 static uint8_t setting_sleep_min = 3;
 static uint8_t setting_autopage_sec = 0;
+static uint8_t setting_new_limit = 20;
+static uint8_t setting_shuffle = 0;
+static uint8_t setting_autoplay = 0;
+static uint16_t setting_new_done = 0;
+static uint32_t setting_new_day = 0;
+static bool autoplay_active = false;
+static int64_t autoplay_empty_since_us = 0;
 static int64_t page_shown_us;
 static bool battery_usable = false;
 static bool screen_dimmed = false;
@@ -330,6 +337,22 @@ static void save_u8_setting(const char *key, uint8_t value)
     }
 }
 
+static uint32_t load_u32_setting(const char *key, uint32_t fallback)
+{
+    uint32_t value = fallback;
+    if (nvs_ready && key != NULL && nvs_get_u32(nvs, key, &value) == ESP_OK) {
+        return value;
+    }
+    return fallback;
+}
+
+static void save_u32_setting(const char *key, uint32_t value)
+{
+    if (nvs_ready && key != NULL && nvs_set_u32(nvs, key, value) == ESP_OK) {
+        (void)nvs_commit(nvs);
+    }
+}
+
 static const char *brightness_label(uint8_t level)
 {
     switch (level) {
@@ -346,6 +369,16 @@ static const char *autopage_label(uint8_t sec)
     case 5: return "5秒";
     case 10: return "10秒";
     default: return "关";
+    }
+}
+
+static const char *new_limit_label(uint8_t limit)
+{
+    switch (limit) {
+    case 0: return "不限";
+    case 10: return "10张";
+    case 50: return "50张";
+    default: return "20张";
     }
 }
 
@@ -546,9 +579,15 @@ draw_labels:
     bsp_lvgl_unlock();
 }
 
+/* Forward declarations: defined before do_grade, called from handle_line. */
+static void study_day_sync(void);
+static void study_day_reset(void);
+
 static void abort_import(void) {
     pa_store_import_abort(&store);
     if (ui == UI_IMPORTING) ui = UI_DECKS;
+    autoplay_active = false;
+    autoplay_empty_since_us = 0;
 }
 
 static void reply_error(const char *code) { printf("ERR %s\n", code); fflush(stdout); }
@@ -583,6 +622,8 @@ static void handle_line(char *line) {
         session.revealed = false;
         import_last_input = esp_timer_get_time();
         ui = UI_IMPORTING;
+        autoplay_active = false;
+        autoplay_empty_since_us = 0;
         printf("OK BEGIN resume=%" PRIu32 "\n", resume);
         fflush(stdout);
         render();
@@ -630,6 +671,9 @@ static void handle_line(char *line) {
         storage_corrupt = false;
         clamp_deck_index();
         ui = UI_DECKS;
+        study_day_reset();
+        autoplay_active = false;
+        autoplay_empty_since_us = 0;
         printf("OK COMMIT\n");
         fflush(stdout);
         render();
@@ -848,19 +892,57 @@ static bool study_has_due(void) {
     return name != NULL && pa_store_next(&store, name) != PA_NO_CARD;
 }
 
+/* New-card day rollover: NVS persists the counts, the store enforces them. */
+static void study_day_sync(void)
+{
+    if (!storage_ready || storage_corrupt) {
+        return;
+    }
+    uint32_t today = pa_store_now(&store) / 1440U;
+    if (setting_new_day != today) {
+        setting_new_day = today;
+        setting_new_done = 0;
+        save_u8_setting("new_done", 0);
+        save_u32_setting("new_day", today);
+        pa_store_set_limits(&store, setting_new_limit, 0);
+    }
+}
+
+static void study_day_reset(void)
+{
+    uint32_t today = (!storage_ready || storage_corrupt) ? setting_new_day
+                                                         : pa_store_now(&store) / 1440U;
+    setting_new_day = today;
+    setting_new_done = 0;
+    save_u8_setting("new_done", 0);
+    save_u32_setting("new_day", today);
+    if (storage_ready && !storage_corrupt) {
+        pa_store_set_limits(&store, setting_new_limit, 0);
+    }
+}
+
 static void do_grade(void) {
     if (session.current == PA_NO_CARD || !session.revealed) return;
+    bool graded_new = pa_store_is_new(&store, session.current);
     if (!pa_store_grade(&store, session.current, selected_rating)) {
         grade_save_failed = true;
         return;
     }
     grade_save_failed = false;
+    if (graded_new && setting_new_done < UINT16_MAX) {
+        setting_new_done++;
+        uint8_t save = setting_new_done > UINT8_MAX ? UINT8_MAX : (uint8_t)setting_new_done;
+        save_u8_setting("new_done", save);
+        pa_store_set_limits(&store, setting_new_limit, setting_new_done);
+    }
     begin_study();
 }
 
 static void process_button(const event_t *event) {
     const bool long_press = event->button_event == BSP_BTN_LONG;
     if (long_press && event->button == BSP_BTN_OK) {
+        autoplay_active = false;
+        autoplay_empty_since_us = 0;
         if (store.import_active) { abort_import(); ui = storage_corrupt ? UI_ERROR : UI_DECKS; }
         else if (ui == UI_ERROR && (storage_corrupt || !storage_ready)) {
             /* Keep unrecoverable storage failures visible without changing data. */
@@ -917,7 +999,7 @@ static void process_button(const event_t *event) {
         else if (pa_store_now(&store) > UINT32_MAX - 1440U || !pa_store_advance(&store, 1440U) ||
                  !pa_store_checkpoint(&store)) {
             ui = UI_ERROR; last_error = "学习日无法保存";
-        } else { confirming_day = false; ui = UI_DECKS; }
+        } else { confirming_day = false; ui = UI_DECKS; study_day_sync(); }
     } else if (ui == UI_QUESTION || ui == UI_ANSWER) {
         const char *text = ui == UI_QUESTION ? card_front : card_back;
         pa_text_page pages[PA_LAYOUT_MAX_PAGES]; size_t pages_count = pages_for(text, pages);
@@ -1127,6 +1209,23 @@ void app_main(void) {
         setting_brightness = load_u8_setting("brightness", 70, brightness_levels, 3);
         setting_sleep_min = load_u8_setting("sleep_min", 3, sleep_levels, 3);
         setting_autopage_sec = load_u8_setting("autopage_sec", 0, autopage_levels, 4);
+        static const uint8_t new_limit_levels[] = {0, 10, 20, 50};
+        static const uint8_t off_on_levels[] = {0, 1};
+        setting_new_limit = load_u8_setting("new_limit", 20, new_limit_levels, 4);
+        setting_shuffle = load_u8_setting("shuffle", 0, off_on_levels, 2);
+        setting_autoplay = load_u8_setting("autoplay", 0, off_on_levels, 2);
+        if (nvs_ready) {
+            uint8_t done = 0;
+            if (nvs_get_u8(nvs, "new_done", &done) == ESP_OK) {
+                setting_new_done = done;
+            }
+            setting_new_day = load_u32_setting("new_day", 0);
+        }
+        pa_store_set_limits(&store, setting_new_limit, setting_new_done);
+        pa_store_set_shuffle(&store, setting_shuffle != 0, (uint32_t)esp_random());
+        study_day_sync();
+        autoplay_active = false;
+        autoplay_empty_since_us = 0;
         bsp_display_backlight(setting_brightness);
     }
     battery_usable = bsp_battery_init() == ESP_OK;
