@@ -708,6 +708,9 @@ uint16_t pa_store_next(pa_store *store, const char *deck)
             if (due > store->now) {
                 continue;
             }
+            if (rec[12] == PA_NEW && store->new_limit != 0 && store->new_done >= store->new_limit) {
+                continue;
+            }
             unsigned priority = rec[12] == PA_LEARNING ? 0u : rec[12] == PA_REVIEW ? 1u : 2u;
             uint32_t id = rd_u32(rec + 16);
             uint16_t index = (uint16_t)(chunk * PA_SCHED_PER_CHUNK + n);
@@ -748,6 +751,37 @@ void pa_store_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS])
                 continue;
             }
             if (rd_u32(rec) <= store->now && counts[deck_id] < UINT16_MAX) {
+                counts[deck_id]++;
+            }
+        }
+    }
+}
+
+void pa_store_new_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS])
+{
+    if (counts == NULL) {
+        return;
+    }
+    for (uint16_t i = 0; i < PA_STORE_MAX_DECKS; ++i) {
+        counts[i] = 0;
+    }
+    if (store == NULL || store->status != PA_STORE_READY || store->import_active) {
+        return;
+    }
+    uint16_t need = chunks_for(store->count);
+    for (uint16_t chunk = 0; chunk < need; ++chunk) {
+        if (!flash_read(store->sched, pool_offset(store->chunk_phys[chunk]), store->sector,
+                        PA_STORE_SECTOR)) {
+            return;
+        }
+        uint16_t records = rd_u16(store->sector + 18);
+        for (uint16_t n = 0; n < records; ++n) {
+            const uint8_t *rec = store->sector + PA_SCHED_HEADER + (uint32_t)n * PA_SCHED_RECORD;
+            uint8_t deck_id = rec[14];
+            if (deck_id >= store->deck_count) {
+                continue;
+            }
+            if (rec[12] == PA_NEW && rd_u32(rec) <= store->now && counts[deck_id] < UINT16_MAX) {
                 counts[deck_id]++;
             }
         }

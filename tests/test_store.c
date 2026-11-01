@@ -526,6 +526,44 @@ static void test_limits_and_is_new(void)
     puts("store: limits setters and is_new PASS");
 }
 
+static void test_new_limit_skip(void)
+{
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store store;
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    uint8_t payload[64];
+    size_t length = append_card(payload, 0, 1, "D", "Q", "A");
+    length = append_card(payload, length, 2, "D", "Q2", "A2");
+    assert(import_bytes(&store, payload, 2, (uint32_t)length));
+    /* Card 0: NEW -> Good (LEARNING s1, due=10) -> advance -> Good
+     * (REVIEW I=1, due=now+1440) -> advance -> REVIEW due. */
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    assert(pa_store_advance(&store, 10));
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    assert(pa_store_advance(&store, 1440));
+    /* Card 1 is still NEW due (due=0 <= now). Limit reached: only REVIEW surfaces. */
+    pa_store_set_limits(&store, 1, 1);
+    assert(pa_store_next(&store, "D") == 0);
+    uint16_t counts[PA_STORE_MAX_DECKS];
+    pa_store_new_due_counts(&store, counts);
+    assert(counts[0] == 1);
+    /* Budget left: push card 0 to the future so only NEW remains, then NEW surfaces. */
+    pa_store_set_limits(&store, 1, 0);
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    assert(pa_store_next(&store, "D") == 1);
+    /* Limit 0 means unlimited even with huge done. */
+    pa_store_set_limits(&store, 0, 999);
+    assert(pa_store_next(&store, "D") == 1);
+    pa_store_new_due_counts(NULL, counts);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    puts("store: new limit skip PASS");
+}
+
 int main(void)
 {
     test_pack_vector();
@@ -538,5 +576,6 @@ int main(void)
     test_due_counts();
     test_today_stats();
     test_limits_and_is_new();
+    test_new_limit_skip();
     return 0;
 }
