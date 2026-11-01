@@ -31,6 +31,7 @@
 #define PA_LINE_MAX 1200
 #define IMPORT_TIMEOUT_US (60LL * 1000 * 1000)
 #define MINUTE_US (60LL * 1000 * 1000)
+#define AUTOPLAY_MAX_WAIT_S (10u * 60u)
 
 extern const lv_font_t pa_font_16;
 extern const lv_font_t pa_font_20;
@@ -472,7 +473,7 @@ static void study_remaining(bool all, uint16_t deck, uint16_t *x_out, uint16_t *
             left = budget;
         }
     }
-    uint32_t x = total - ntotal + left;
+    uint32_t x = total >= ntotal ? total - ntotal + left : left;
     if (x > UINT16_MAX) {
         x = UINT16_MAX;
     }
@@ -502,10 +503,8 @@ static void render(void) {
     if (ui == UI_DECKS) {
         static uint16_t due[PA_STORE_MAX_DECKS];
         if (deck_index == 0 && count > 0) {
-            uint32_t total_due = 0;
             uint32_t by_rating[4] = {0, 0, 0, 0}, today_total = 0;
             pa_store_due_counts(&store, due);
-            for (uint16_t i = 0; i < count; ++i) total_due += due[i];
             pa_store_today_stats(&store, by_rating, &today_total);
             uint16_t remain_x = 0, remain_y = 0, forecast[3] = {0, 0, 0};
             study_remaining(true, 0, &remain_x, &remain_y);
@@ -635,10 +634,33 @@ static void render(void) {
                 snprintf(body, sizeof(body), "自动播放等待中\n约 %" PRIu32 " 秒后继续\n牌组：%s",
                          wait_s, study_name != NULL ? study_name : "全部");
             } else {
-                snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n今日已评 %" PRIu32 "（%u/%u/%u/%u）\n可推进学习日。",
-                         study_name != NULL ? study_name : "全部", today_total,
-                         (unsigned)by_rating[0], (unsigned)by_rating[1],
-                         (unsigned)by_rating[2], (unsigned)by_rating[3]);
+                /* New-card budget exhausted but NEW cards remain (LEARNING/
+                 * REVIEW all clear): surface the reason instead of "done". */
+                bool limit_hit = false;
+                if (setting_new_limit != 0 && setting_new_done >= setting_new_limit) {
+                    static uint16_t scoped_ndue[PA_STORE_MAX_DECKS];
+                    pa_store_new_due_counts(&store, scoped_ndue);
+                    uint16_t scoped = 0;
+                    if (study_all) {
+                        for (uint16_t i = 0; i < count; ++i) {
+                            scoped += scoped_ndue[i];
+                        }
+                    } else if (study_deck < count) {
+                        scoped = scoped_ndue[study_deck];
+                    }
+                    limit_hit = scoped > 0 && !study_has_due();
+                }
+                if (limit_hit) {
+                    snprintf(body, sizeof(body), "今日新卡已学完\n牌组：%s\n今日已评 %" PRIu32 "（%u/%u/%u/%u）\n可推进学习日。",
+                             study_name != NULL ? study_name : "全部", today_total,
+                             (unsigned)by_rating[0], (unsigned)by_rating[1],
+                             (unsigned)by_rating[2], (unsigned)by_rating[3]);
+                } else {
+                    snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n今日已评 %" PRIu32 "（%u/%u/%u/%u）\n可推进学习日。",
+                             study_name != NULL ? study_name : "全部", today_total,
+                             (unsigned)by_rating[0], (unsigned)by_rating[1],
+                             (unsigned)by_rating[2], (unsigned)by_rating[3]);
+                }
             }
         }
         snprintf(footer, sizeof(footer), autoplay_active ? "按任意键转手动" : "OK 重新检查");
@@ -676,6 +698,8 @@ draw_labels:
 /* Forward declarations: defined before do_grade, called from handle_line. */
 static void study_day_sync(void);
 static void study_day_reset(void);
+static bool study_has_due(void);
+static bool autoplay_scope_earliest(uint32_t *due_out);
 
 static void abort_import(void) {
     pa_store_import_abort(&store);
@@ -964,6 +988,7 @@ static void check_idle_sleep(int64_t now)
  * the first deck row had no OK branch and grading re-entered the wrong deck. */
 static void begin_study(void) {
     if (storage_corrupt) { ui = UI_ERROR; return; }
+    study_day_sync();
     session.current = PA_NO_CARD;
     if (study_all) {
         for (uint16_t i = 0; i < pa_store_deck_count(&store); ++i) {
@@ -1051,6 +1076,7 @@ static void study_day_reset(void)
 
 static void do_grade(void) {
     if (session.current == PA_NO_CARD || !session.revealed) return;
+    study_day_sync();
     bool graded_new = pa_store_is_new(&store, session.current);
     if (!pa_store_grade(&store, session.current, selected_rating)) {
         grade_save_failed = true;
@@ -1065,8 +1091,6 @@ static void do_grade(void) {
     }
     begin_study();
 }
-
-#define AUTOPLAY_MAX_WAIT_S (10u * 60u)
 
 /* Hands-free play: page -> flip -> auto Good, until nothing is due today. */
 static void autoplay_step(int64_t now)
@@ -1303,6 +1327,7 @@ static void app_task(void *arg) {
                 if (elapsed && pa_store_advance(&store, elapsed)) {
                     last_clock_us += (int64_t)elapsed * MINUTE_US;
                     if (now - last_checkpoint >= 5 * MINUTE_US && pa_store_checkpoint(&store)) last_checkpoint = now;
+                    study_day_sync();
                     if (ui == UI_EMPTY && study_has_due()) begin_study();
                     render();
                 }

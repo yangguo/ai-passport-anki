@@ -663,6 +663,59 @@ static void test_forecast_and_earliest(void)
     puts("store: forecast and earliest due PASS");
 }
 
+static void test_shuffle_with_limit(void)
+{
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store store;
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    /* idx0 becomes REVIEW-due, idx1..idx3 stay NEW-due.
+     * Card 0: NEW -> Good (LEARNING s1, due=10) -> advance -> Good
+     * (REVIEW I=1, due=now+1440) -> advance -> REVIEW due. */
+    uint8_t payload[128];
+    size_t length = 0;
+    for (uint32_t i = 1; i <= 4; ++i) {
+        length = append_card(payload, length, i, "D", "Q", "A");
+    }
+    assert(import_bytes(&store, payload, 4, (uint32_t)length));
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    assert(pa_store_advance(&store, 10));
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    assert(pa_store_advance(&store, 1440));
+    /* Limit reached (1 new already counted) + shuffle on: the REVIEW card
+     * must win for every seed. */
+    pa_store_set_limits(&store, 1, 1);
+    for (uint32_t seed = 1; seed <= 10; ++seed) {
+        pa_store_set_shuffle(&store, true, seed);
+        assert(pa_store_next(&store, "D") == 0);
+    }
+    /* Push the REVIEW card to the future: only NEW remains, still gated,
+     * so nothing is due even under shuffle. */
+    pa_store_set_shuffle(&store, true, 42);
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    assert(pa_store_next(&store, "D") == PA_NO_CARD);
+    /* Budget left: shuffled NEW cards surface with spread across seeds. */
+    pa_store_set_limits(&store, 1, 0);
+    bool seen[4] = {false, false, false, false};
+    for (uint32_t seed = 1; seed <= 50; ++seed) {
+        pa_store_set_shuffle(&store, true, seed);
+        uint16_t got = pa_store_next(&store, "D");
+        assert(got >= 1 && got <= 3);
+        seen[got] = true;
+    }
+    int distinct = 0;
+    for (int i = 1; i <= 3; ++i) {
+        distinct += seen[i] ? 1 : 0;
+    }
+    assert(distinct >= 2);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    puts("store: shuffle with new limit PASS");
+}
+
 int main(void)
 {
     test_pack_vector();
@@ -677,6 +730,7 @@ int main(void)
     test_limits_and_is_new();
     test_new_limit_skip();
     test_shuffle_within_priority();
+    test_shuffle_with_limit();
     test_forecast_and_earliest();
     return 0;
 }
