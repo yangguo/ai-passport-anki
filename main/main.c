@@ -620,12 +620,28 @@ static void render(void) {
         pa_store_today_stats(&store, by_rating, &today_total);
         {
             const char *study_name = study_all ? "全部" : pa_store_deck_name(&store, study_deck);
-            snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n今日已评 %" PRIu32 "（%u/%u/%u/%u）\n可推进学习日。",
-                     study_name != NULL ? study_name : "全部", today_total,
-                     (unsigned)by_rating[0], (unsigned)by_rating[1],
-                     (unsigned)by_rating[2], (unsigned)by_rating[3]);
+            uint32_t wait_due = 0;
+            uint32_t wait_s = 0;
+            bool waiting = autoplay_active && autoplay_scope_earliest(&wait_due) &&
+                           (wait_s = wait_due > pa_store_now(&store)
+                                         ? (wait_due - pa_store_now(&store)) * 60u
+                                         : 0u,
+                            wait_s <= AUTOPLAY_MAX_WAIT_S);
+            if (waiting && autoplay_empty_since_us != 0) {
+                int64_t elapsed = (esp_timer_get_time() - autoplay_empty_since_us) / (1000 * 1000);
+                wait_s = elapsed >= 0 && (uint64_t)elapsed < wait_s ? wait_s - (uint32_t)elapsed : 0u;
+            }
+            if (waiting) {
+                snprintf(body, sizeof(body), "自动播放等待中\n约 %" PRIu32 " 秒后继续\n牌组：%s",
+                         wait_s, study_name != NULL ? study_name : "全部");
+            } else {
+                snprintf(body, sizeof(body), "今天已完成\n牌组：%s\n今日已评 %" PRIu32 "（%u/%u/%u/%u）\n可推进学习日。",
+                         study_name != NULL ? study_name : "全部", today_total,
+                         (unsigned)by_rating[0], (unsigned)by_rating[1],
+                         (unsigned)by_rating[2], (unsigned)by_rating[3]);
+            }
         }
-        snprintf(footer, sizeof(footer), "OK 重新检查");
+        snprintf(footer, sizeof(footer), autoplay_active ? "按任意键转手动" : "OK 重新检查");
     } else if (ui == UI_CONFIRM_DAY) {
         snprintf(body, sizeof(body), "推进学习日 +1？\n\n当前选择：%s\n设备时间保持不变。",
                  confirming_day ? "确认" : "取消");
@@ -917,6 +933,17 @@ static void check_idle_sleep(int64_t now)
         dim_start_us = now;
         return;
     }
+    if (autoplay_active) {
+        /* Hands-free playback keeps the screen on like an import. */
+        if (screen_dimmed) {
+            screen_dimmed = false;
+            bsp_display_backlight(setting_brightness);
+            render();
+        }
+        last_activity_us = now;
+        dim_start_us = now;
+        return;
+    }
     if (!screen_dimmed) {
         if (now - last_activity_us >= (int64_t)setting_sleep_min * 60 * 1000 * 1000) {
             screen_dimmed = true;
@@ -970,6 +997,29 @@ static bool study_has_due(void) {
     return name != NULL && pa_store_next(&store, name) != PA_NO_CARD;
 }
 
+static bool autoplay_scope_earliest(uint32_t *due_out)
+{
+    uint32_t best = 0;
+    bool found = false;
+    if (study_all) {
+        for (uint16_t i = 0; i < pa_store_deck_count(&store); ++i) {
+            uint32_t d = 0;
+            if (pa_store_earliest_due(&store, pa_store_deck_name(&store, i), &d) &&
+                (!found || d < best)) {
+                best = d;
+                found = true;
+            }
+        }
+    } else {
+        const char *name = pa_store_deck_name(&store, study_deck);
+        found = name != NULL && pa_store_earliest_due(&store, name, &best);
+    }
+    if (due_out != NULL && found) {
+        *due_out = best;
+    }
+    return found;
+}
+
 /* New-card day rollover: NVS persists the counts, the store enforces them. */
 static void study_day_sync(void)
 {
@@ -1014,6 +1064,86 @@ static void do_grade(void) {
         pa_store_set_limits(&store, setting_new_limit, setting_new_done);
     }
     begin_study();
+}
+
+#define AUTOPLAY_MAX_WAIT_S (10u * 60u)
+
+/* Hands-free play: page -> flip -> auto Good, until nothing is due today. */
+static void autoplay_step(int64_t now)
+{
+    if (ui != UI_QUESTION && ui != UI_ANSWER) {
+        return;
+    }
+    if (grade_save_failed) {
+        autoplay_active = false;
+        render();
+        return;
+    }
+    uint32_t interval = setting_autopage_sec != 0 ? (uint32_t)setting_autopage_sec : 3u;
+    if (now - page_shown_us < (int64_t)interval * 1000 * 1000) {
+        return;
+    }
+    const char *text = ui == UI_QUESTION ? card_front : card_back;
+    pa_text_page pages[PA_LAYOUT_MAX_PAGES];
+    size_t pages_count = pages_for(text, pages);
+    if (pages_count == 0) {
+        autoplay_active = false;
+        render();
+        return;
+    }
+    uint16_t *page = ui == UI_QUESTION ? &question_page : &answer_page;
+    if (*page >= pages_count) {
+        *page = 0;
+    }
+    if (*page + 1 < pages_count) {
+        (*page)++;
+        page_shown_us = now;
+        render();
+        return;
+    }
+    if (ui == UI_QUESTION) {
+        ui = UI_ANSWER;
+        answer_page = 0;
+        session.revealed = true;
+        page_shown_us = now;
+        render();
+        return;
+    }
+    selected_rating = PA_GOOD;
+    do_grade();
+    page_shown_us = esp_timer_get_time();
+    autoplay_empty_since_us = (autoplay_active && ui == UI_EMPTY) ? page_shown_us : 0;
+    if (ui == UI_ERROR) {
+        autoplay_active = false;
+    }
+    render();
+}
+
+static void autoplay_wait_tick(int64_t now)
+{
+    if (study_has_due()) {
+        begin_study();
+        if (ui != UI_QUESTION) {
+            autoplay_active = false;
+        } else {
+            autoplay_empty_since_us = 0;
+            page_shown_us = now;
+        }
+        render();
+        return;
+    }
+    uint32_t due = 0;
+    if (autoplay_scope_earliest(&due)) {
+        uint32_t store_now = pa_store_now(&store);
+        uint32_t wait_s = due > store_now ? (due - store_now) * 60u : 0u;
+        if (wait_s <= AUTOPLAY_MAX_WAIT_S) {
+            render();
+            return;
+        }
+    }
+    autoplay_active = false;
+    autoplay_empty_since_us = 0;
+    render();
 }
 
 static void process_button(const event_t *event) {
@@ -1140,6 +1270,14 @@ static void app_task(void *arg) {
                 screen_dimmed = false;
                 bsp_display_backlight(setting_brightness);
                 render();
+            } else if (autoplay_active && (study_card_ui() || ui == UI_EMPTY)) {
+                /* Any key exits autoplay and is consumed: no flip, no grade. */
+                int64_t press_now = esp_timer_get_time();
+                autoplay_active = false;
+                autoplay_empty_since_us = 0;
+                note_activity(press_now);
+                page_shown_us = press_now;
+                render();
             } else if (pa_cover_requests_launcher((int)ui, (int)event.button, (int)event.button_event)) {
                 if (storage_ready && !storage_corrupt && !store.import_active) {
                     (void)pa_store_checkpoint(&store);
@@ -1173,8 +1311,13 @@ static void app_task(void *arg) {
         } else if (event.type == EVENT_IDLE) {
             int64_t now = esp_timer_get_time();
             check_idle_sleep(now);
-            if (!screen_dimmed && setting_autopage_sec > 0 &&
-                (ui == UI_QUESTION || ui == UI_ANSWER)) {
+            if (autoplay_active && ui == UI_EMPTY) {
+                autoplay_wait_tick(now);
+            } else if (autoplay_active && (ui == UI_QUESTION || ui == UI_ANSWER) &&
+                       !screen_dimmed) {
+                autoplay_step(now);
+            } else if (!autoplay_active && !screen_dimmed && setting_autopage_sec > 0 &&
+                       (ui == UI_QUESTION || ui == UI_ANSWER)) {
                 const char *text = ui == UI_QUESTION ? card_front : card_back;
                 pa_text_page pages[PA_LAYOUT_MAX_PAGES];
                 size_t pages_count = pages_for(text, pages);
