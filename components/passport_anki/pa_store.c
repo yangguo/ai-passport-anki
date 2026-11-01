@@ -680,6 +680,19 @@ static bool read_record(const pa_store *store, uint16_t index, uint8_t out[PA_SC
     return flash_read(store->sched, offset, out, PA_SCHED_RECORD);
 }
 
+static uint32_t pa_rng_next(pa_store *store)
+{
+    if (store->rng_state == 0) {
+        store->rng_state = 0x9E3779B9u;
+    }
+    uint32_t x = store->rng_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    store->rng_state = x;
+    return x;
+}
+
 uint16_t pa_store_next(pa_store *store, const char *deck)
 {
     if (store == NULL || store->status != PA_STORE_READY || store->import_active) {
@@ -689,11 +702,49 @@ uint16_t pa_store_next(pa_store *store, const char *deck)
     if (deck_id < 0) {
         return PA_NO_CARD;
     }
-    uint16_t best = PA_NO_CARD;
-    unsigned best_priority = 3;
-    uint32_t best_due = 0;
-    uint32_t best_id = 0;
+    bool limited = store->new_limit != 0 && store->new_done >= store->new_limit;
     uint16_t need = chunks_for(store->count);
+    if (!store->shuffle_on) {
+        /* Legacy path: lowest (priority, due, id). NEW skipped when limited. */
+        uint16_t best = PA_NO_CARD;
+        unsigned best_priority = 3;
+        uint32_t best_due = 0;
+        uint32_t best_id = 0;
+        for (uint16_t chunk = 0; chunk < need; ++chunk) {
+            if (!flash_read(store->sched, pool_offset(store->chunk_phys[chunk]), store->sector, PA_STORE_SECTOR)) {
+                return PA_NO_CARD;
+            }
+            uint16_t records = rd_u16(store->sector + 18);
+            for (uint16_t n = 0; n < records; ++n) {
+                const uint8_t *rec = store->sector + PA_SCHED_HEADER + (uint32_t)n * PA_SCHED_RECORD;
+                if (rec[14] != (uint8_t)deck_id) {
+                    continue;
+                }
+                uint32_t due = rd_u32(rec);
+                if (due > store->now) {
+                    continue;
+                }
+                if (rec[12] == PA_NEW && limited) {
+                    continue;
+                }
+                unsigned priority = rec[12] == PA_LEARNING ? 0u : rec[12] == PA_REVIEW ? 1u : 2u;
+                uint32_t id = rd_u32(rec + 16);
+                uint16_t index = (uint16_t)(chunk * PA_SCHED_PER_CHUNK + n);
+                if (best == PA_NO_CARD || priority < best_priority ||
+                    (priority == best_priority && (due < best_due || (due == best_due && id < best_id)))) {
+                    best = index;
+                    best_priority = priority;
+                    best_due = due;
+                    best_id = id;
+                }
+            }
+        }
+        return best;
+    }
+    /* Shuffled path: reservoir sampling within each priority; lowest
+     * non-empty priority wins. Due filter and NEW limit still apply. */
+    uint16_t res[3] = {PA_NO_CARD, PA_NO_CARD, PA_NO_CARD};
+    uint32_t seen[3] = {0, 0, 0};
     for (uint16_t chunk = 0; chunk < need; ++chunk) {
         if (!flash_read(store->sched, pool_offset(store->chunk_phys[chunk]), store->sector, PA_STORE_SECTOR)) {
             return PA_NO_CARD;
@@ -708,22 +759,23 @@ uint16_t pa_store_next(pa_store *store, const char *deck)
             if (due > store->now) {
                 continue;
             }
-            if (rec[12] == PA_NEW && store->new_limit != 0 && store->new_done >= store->new_limit) {
+            if (rec[12] == PA_NEW && limited) {
                 continue;
             }
             unsigned priority = rec[12] == PA_LEARNING ? 0u : rec[12] == PA_REVIEW ? 1u : 2u;
-            uint32_t id = rd_u32(rec + 16);
             uint16_t index = (uint16_t)(chunk * PA_SCHED_PER_CHUNK + n);
-            if (best == PA_NO_CARD || priority < best_priority ||
-                (priority == best_priority && (due < best_due || (due == best_due && id < best_id)))) {
-                best = index;
-                best_priority = priority;
-                best_due = due;
-                best_id = id;
+            seen[priority]++;
+            if (pa_rng_next(store) % seen[priority] == 0) {
+                res[priority] = index;
             }
         }
     }
-    return best;
+    for (unsigned priority = 0; priority < 3; ++priority) {
+        if (seen[priority] > 0) {
+            return res[priority];
+        }
+    }
+    return PA_NO_CARD;
 }
 
 void pa_store_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS])

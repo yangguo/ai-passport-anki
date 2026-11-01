@@ -564,6 +564,64 @@ static void test_new_limit_skip(void)
     puts("store: new limit skip PASS");
 }
 
+static void test_shuffle_within_priority(void)
+{
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store store;
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    uint8_t payload[128];
+    size_t length = 0;
+    for (uint32_t i = 1; i <= 5; ++i) {
+        length = append_card(payload, length, i, "D", "Q", "A");
+    }
+    assert(import_bytes(&store, payload, 5, (uint32_t)length));
+    /* One LEARNING-due card beats NEW cards even when shuffled. */
+    assert(pa_store_grade(&store, 0, PA_AGAIN));
+    assert(pa_store_advance(&store, 1));
+    pa_store_set_shuffle(&store, true, 1234);
+    assert(pa_store_next(&store, "D") == 0);
+    /* Deterministic: same seed, same pick. */
+    pa_store_set_shuffle(&store, true, 777);
+    uint16_t first = pa_store_next(&store, "D");
+    pa_store_set_shuffle(&store, true, 777);
+    assert(pa_store_next(&store, "D") == first);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+
+    /* All-NEW deck: shuffled picks spread across indices. */
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    length = 0;
+    for (uint32_t i = 1; i <= 5; ++i) {
+        length = append_card(payload, length, i, "E", "Q", "A");
+    }
+    assert(import_bytes(&store, payload, 5, (uint32_t)length));
+    bool seen[5] = {false, false, false, false, false};
+    for (uint32_t seed = 1; seed <= 100; ++seed) {
+        pa_store_set_shuffle(&store, true, seed);
+        uint16_t got = pa_store_next(&store, "E");
+        assert(got < 5);
+        seen[got] = true;
+    }
+    int distinct = 0;
+    for (int i = 0; i < 5; ++i) {
+        distinct += seen[i] ? 1 : 0;
+    }
+    assert(distinct >= 3);
+    /* Shuffle off restores due/id order: all NEW due=0, lowest id wins. */
+    pa_store_set_shuffle(&store, false, 0);
+    assert(pa_store_next(&store, "E") == 0);
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    puts("store: shuffle within priority PASS");
+}
+
 int main(void)
 {
     test_pack_vector();
@@ -577,5 +635,6 @@ int main(void)
     test_today_stats();
     test_limits_and_is_new();
     test_new_limit_skip();
+    test_shuffle_within_priority();
     return 0;
 }
