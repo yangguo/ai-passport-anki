@@ -436,6 +436,57 @@ static void sync_study_chrome(void) {
     }
 }
 
+/* Remaining today in scope: (LEARNING+REVIEW due) + NEW within budget. */
+static void study_remaining(bool all, uint16_t deck, uint16_t *x_out, uint16_t *y_out)
+{
+    if (x_out != NULL) {
+        *x_out = 0;
+    }
+    if (y_out != NULL) {
+        *y_out = 0;
+    }
+    if (!storage_ready || storage_corrupt) {
+        return;
+    }
+    static uint16_t due[PA_STORE_MAX_DECKS];
+    static uint16_t ndue[PA_STORE_MAX_DECKS];
+    uint16_t count = deck_count();
+    pa_store_due_counts(&store, due);
+    pa_store_new_due_counts(&store, ndue);
+    uint32_t total = 0, ntotal = 0;
+    if (all) {
+        for (uint16_t i = 0; i < count; ++i) {
+            total += due[i];
+            ntotal += ndue[i];
+        }
+    } else if (deck < count) {
+        total = due[deck];
+        ntotal = ndue[deck];
+    }
+    uint32_t left = ntotal;
+    if (setting_new_limit != 0) {
+        uint32_t budget = setting_new_done >= setting_new_limit
+                              ? 0u
+                              : (uint32_t)setting_new_limit - setting_new_done;
+        if (left > budget) {
+            left = budget;
+        }
+    }
+    uint32_t x = total - ntotal + left;
+    if (x > UINT16_MAX) {
+        x = UINT16_MAX;
+    }
+    if (left > UINT16_MAX) {
+        left = UINT16_MAX;
+    }
+    if (x_out != NULL) {
+        *x_out = (uint16_t)x;
+    }
+    if (y_out != NULL) {
+        *y_out = (uint16_t)left;
+    }
+}
+
 static void render(void) {
     if (!title_label || !body_label || !footer_label || !bsp_lvgl_lock(100)) return;
     char title[96], body[PA_LINE_MAX + 1], footer[160];
@@ -456,10 +507,14 @@ static void render(void) {
             pa_store_due_counts(&store, due);
             for (uint16_t i = 0; i < count; ++i) total_due += due[i];
             pa_store_today_stats(&store, by_rating, &today_total);
-            snprintf(body, sizeof(body), "今日已评 %" PRIu32 "（%u/%u/%u/%u）\n待学 %" PRIu32 " · %u 牌组\n学习日 %" PRIu32,
+            uint16_t remain_x = 0, remain_y = 0, forecast[3] = {0, 0, 0};
+            study_remaining(true, 0, &remain_x, &remain_y);
+            pa_store_forecast(&store, forecast);
+            snprintf(body, sizeof(body), "今日已评 %" PRIu32 "（%u/%u/%u/%u）\n待学 %u（含新%u） · %u 牌组\n明%u/后%u/大后%u\n学习日 %" PRIu32,
                      today_total, (unsigned)by_rating[0], (unsigned)by_rating[1],
                      (unsigned)by_rating[2], (unsigned)by_rating[3],
-                     total_due, count, day);
+                     remain_x, remain_y, count,
+                     (unsigned)forecast[0], (unsigned)forecast[1], (unsigned)forecast[2], day);
             snprintf(footer, sizeof(footer), "上下翻页 OK 进牌组");
         } else {
             const uint16_t extra = deck_index >= count + 1u ? (uint16_t)(deck_index - count - 1u)
@@ -542,11 +597,15 @@ static void render(void) {
             goto draw_labels;
         }
         snprintf(title, sizeof(title), "%s", card_deck);
+        uint16_t remain_x = 0, remain_y = 0;
+        study_remaining(study_all, study_deck, &remain_x, &remain_y);
         if (ui == UI_QUESTION) {
-            snprintf(footer, sizeof(footer), "%u/%u  OK 翻面", page + 1, (unsigned)pages_count);
+            snprintf(footer, sizeof(footer), "%u/%u 剩%u·新%u OK 翻面", page + 1, (unsigned)pages_count,
+                     remain_x, remain_y);
         } else if (ui == UI_ANSWER) {
             body_color = 0xE7F0FA;
-            snprintf(footer, sizeof(footer), "%u/%u  OK 评分", page + 1, (unsigned)pages_count);
+            snprintf(footer, sizeof(footer), "%u/%u 剩%u·新%u OK 评分", page + 1, (unsigned)pages_count,
+                     remain_x, remain_y);
         } else if (grade_save_failed) {
             body_color = 0xE7F0FA;
             footer_color = 0xE05A5A;
@@ -554,7 +613,7 @@ static void render(void) {
         } else {
             body_color = 0xE7F0FA;
             footer_color = 0xC8D0DA;
-            snprintf(footer, sizeof(footer), "上下选择  OK 确认");
+            snprintf(footer, sizeof(footer), "剩%u·新%u 上下选择 OK", remain_x, remain_y);
         }
     } else if (ui == UI_EMPTY) {
         uint32_t by_rating[4] = {0, 0, 0, 0}, today_total = 0;
