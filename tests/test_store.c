@@ -498,6 +498,34 @@ static void test_today_stats(void)
     puts("store: today stats PASS");
 }
 
+static void test_limits_and_is_new(void)
+{
+    ram_flash cards_ram, sched_ram;
+    pa_flash cards, sched;
+    make_flash(&cards_ram, &cards, PA_CARDS_PARTITION_SIZE);
+    make_flash(&sched_ram, &sched, PA_SCHED_PARTITION_SIZE);
+    pa_store store;
+    pa_store_init(&store, &cards, &sched);
+    assert(pa_store_mount(&store) == PA_STORE_EMPTY);
+    uint8_t payload[64];
+    size_t length = append_card(payload, 0, 1, "D", "Q", "A");
+    length = append_card(payload, length, 2, "D", "Q2", "A2");
+    assert(import_bytes(&store, payload, 2, (uint32_t)length));
+    assert(!pa_store_is_new(NULL, 0));
+    assert(!pa_store_is_new(&store, 99));
+    assert(pa_store_is_new(&store, 0));
+    assert(pa_store_is_new(&store, 1));
+    pa_store_set_limits(NULL, 1, 1);
+    pa_store_set_shuffle(NULL, true, 42);
+    pa_store_set_limits(&store, 20, 0);
+    assert(pa_store_grade(&store, 0, PA_GOOD));
+    assert(!pa_store_is_new(&store, 0));
+    assert(pa_store_is_new(&store, 1));
+    free_flash(&cards_ram);
+    free_flash(&sched_ram);
+    puts("store: limits setters and is_new PASS");
+}
+
 int main(void)
 {
     test_pack_vector();
@@ -509,5 +537,6 @@ int main(void)
     test_region_plan_and_compact_slot();
     test_due_counts();
     test_today_stats();
+    test_limits_and_is_new();
     return 0;
 }

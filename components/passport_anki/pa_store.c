@@ -526,6 +526,10 @@ void pa_store_init(pa_store *store, pa_flash *cards, pa_flash *sched)
     store->cards = cards;
     store->sched = sched;
     clear_chunk_map(store);
+    store->new_limit = 0;
+    store->shuffle_on = 0;
+    store->new_done = 0;
+    store->rng_state = 0x9E3779B9u;
 }
 
 pa_store_status pa_store_mount(pa_store *store)
@@ -748,6 +752,38 @@ void pa_store_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS])
             }
         }
     }
+}
+
+void pa_store_set_limits(pa_store *store, uint8_t new_limit, uint16_t new_done)
+{
+    if (store == NULL) {
+        return;
+    }
+    store->new_limit = new_limit;
+    store->new_done = new_done;
+}
+
+void pa_store_set_shuffle(pa_store *store, bool shuffle_on, uint32_t seed)
+{
+    if (store == NULL) {
+        return;
+    }
+    store->shuffle_on = shuffle_on ? 1u : 0u;
+    if (seed != 0) {
+        store->rng_state = seed;
+    }
+}
+
+bool pa_store_is_new(pa_store *store, uint16_t index)
+{
+    if (store == NULL || store->status != PA_STORE_READY || index >= store->count) {
+        return false;
+    }
+    uint8_t rec[PA_SCHED_RECORD];
+    if (!read_record(store, index, rec)) {
+        return false;
+    }
+    return rec[12] == PA_NEW;
 }
 
 void pa_store_today_stats(pa_store *store, uint32_t by_rating[4], uint32_t *total)

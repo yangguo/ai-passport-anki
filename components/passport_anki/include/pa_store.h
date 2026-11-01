@@ -99,6 +99,10 @@ typedef struct pa_store {
     uint32_t import_progress_generation;
     uint32_t revlog_count;
     uint32_t revlog_dropped;
+    uint8_t new_limit;
+    uint8_t shuffle_on;
+    uint16_t new_done;
+    uint32_t rng_state;
     uint32_t mutation;
     uint32_t export_length;
     uint32_t export_crc;
@@ -139,6 +143,14 @@ bool pa_store_checkpoint(pa_store *store);
 uint16_t pa_store_next(pa_store *store, const char *deck);
 void pa_store_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS]);
 void pa_store_today_stats(pa_store *store, uint32_t by_rating[4], uint32_t *total);
+/* Daily NEW-card policy (RAM only, persisted by the caller in NVS).
+ * new_limit 0 means unlimited. new_done counts NEW grades today. */
+void pa_store_set_limits(pa_store *store, uint8_t new_limit, uint16_t new_done);
+void pa_store_set_shuffle(pa_store *store, bool shuffle_on, uint32_t seed);
+bool pa_store_is_new(pa_store *store, uint16_t index);
+void pa_store_new_due_counts(pa_store *store, uint16_t counts[PA_STORE_MAX_DECKS]);
+void pa_store_forecast(pa_store *store, uint16_t buckets[3]);
+bool pa_store_earliest_due(pa_store *store, const char *deck, uint32_t *due_out);
 bool pa_store_read(pa_store *store, uint16_t index, char *deck, size_t deck_cap,
                    char *front, size_t front_cap, char *back, size_t back_cap);
 bool pa_store_grade(pa_store *store, uint16_t index, pa_rating rating);
