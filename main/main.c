@@ -294,8 +294,8 @@ static size_t pages_for(const char *text, pa_text_page pages[PA_LAYOUT_MAX_PAGES
 static uint16_t deck_count(void) { return pa_store_deck_count(&store); }
 
 /* Deck list: stats summary, decks..., then "next day", brightness, sleep,
- * auto-page, battery rows. */
-#define DECK_EXTRA_ROWS 5u
+ * auto-page, battery, new-card limit, shuffle, forecast, autoplay rows. */
+#define DECK_EXTRA_ROWS 9u
 
 static uint16_t deck_entries(void)
 {
@@ -498,6 +498,25 @@ static void render(void) {
                              soc <= 20 ? "电量低，请充电" : "剩余电量");
                 }
                 snprintf(footer, sizeof(footer), "OK 返回");
+            } else if (extra == 5u) {
+                snprintf(body, sizeof(body), "新卡限额：%s\n\nOK 切换 不限/10/20/50\n今日已学 %u",
+                         new_limit_label(setting_new_limit), (unsigned)setting_new_done);
+                snprintf(footer, sizeof(footer), "OK 切换");
+            } else if (extra == 6u) {
+                snprintf(body, sizeof(body), "打乱顺序：%s\n\nOK 切换 开/关\n同级内随机",
+                         setting_shuffle ? "开" : "关");
+                snprintf(footer, sizeof(footer), "OK 切换");
+            } else if (extra == 7u) {
+                uint16_t forecast[3] = {0, 0, 0};
+                pa_store_forecast(&store, forecast);
+                snprintf(body, sizeof(body), "未来3天：明%u/后%u/大后%u\n\n到期分布（全部牌组）",
+                         (unsigned)forecast[0], (unsigned)forecast[1], (unsigned)forecast[2]);
+                snprintf(footer, sizeof(footer), "OK 返回");
+            } else if (extra == 8u) {
+                snprintf(body, sizeof(body), "自动播放：%s\n\nOK %s\n播完今日全部，自动记Good",
+                         setting_autoplay ? "开" : "关",
+                         setting_autoplay ? "关闭" : "开始播放");
+                snprintf(footer, sizeof(footer), "OK 执行");
             }
         }
     } else if (ui == UI_QUESTION || ui == UI_ANSWER || ui == UI_RATING) {
@@ -960,15 +979,21 @@ static void process_button(const event_t *event) {
         if (entries == 0) { render(); return; }
         /* Index 0 is the stats summary when decks exist (the empty message
          * when none); decks sit at 1..count, then the setting rows starting
-         * at settings_base (next day, brightness, sleep, auto-page, battery). */
+         * at settings_base (next day, brightness, sleep, auto-page, battery, new limit, shuffle, forecast, autoplay). */
         const uint16_t settings_base = count > 0 ? (uint16_t)(count + 1u) : 1u;
         if (event->button == BSP_BTN_UP) deck_index = (uint16_t)((deck_index + entries - 1) % entries);
         else if (event->button == BSP_BTN_DOWN) deck_index = (uint16_t)((deck_index + 1) % entries);
-        else if (count > 0 && deck_index == 0) { study_all = true; study_deck = 0; begin_study(); }
+        else if (count > 0 && deck_index == 0) {
+            study_all = true; study_deck = 0; begin_study();
+            autoplay_active = setting_autoplay != 0 && ui == UI_QUESTION;
+            autoplay_empty_since_us = 0;
+        }
         else if (count > 0 && deck_index >= 1u && deck_index <= count) {
             study_all = false;
             study_deck = (uint16_t)(deck_index - 1u);
             begin_study();
+            autoplay_active = setting_autoplay != 0 && ui == UI_QUESTION;
+            autoplay_empty_since_us = 0;
         }
         else if (deck_index == settings_base ||
                  (count == 0 && deck_index == 0)) { confirming_day = true; ui = UI_CONFIRM_DAY; }
@@ -992,6 +1017,33 @@ static void process_button(const event_t *event) {
             /* Battery row is read-only; OK gives visible feedback by
              * returning to the stats summary instead of doing nothing. */
             deck_index = 0;
+        } else if (deck_index == settings_base + 5u) {
+            setting_new_limit = setting_new_limit == 0u ? 10u : setting_new_limit == 10u ? 20u
+                                : setting_new_limit == 20u ? 50u : 0u;
+            save_u8_setting("new_limit", setting_new_limit);
+            pa_store_set_limits(&store, setting_new_limit, setting_new_done);
+        } else if (deck_index == settings_base + 6u) {
+            setting_shuffle = setting_shuffle ? 0u : 1u;
+            save_u8_setting("shuffle", setting_shuffle);
+            pa_store_set_shuffle(&store, setting_shuffle != 0, (uint32_t)esp_random());
+        } else if (deck_index == settings_base + 7u) {
+            /* Forecast row is read-only; OK gives visible feedback by
+             * returning to the stats summary instead of doing nothing. */
+            deck_index = 0;
+        } else if (deck_index == settings_base + 8u) {
+            setting_autoplay = setting_autoplay ? 0u : 1u;
+            save_u8_setting("autoplay", setting_autoplay);
+            if (setting_autoplay) {
+                autoplay_active = true;
+                autoplay_empty_since_us = 0;
+                begin_study();
+                if (ui != UI_QUESTION) {
+                    autoplay_active = false;
+                }
+            } else {
+                autoplay_active = false;
+                autoplay_empty_since_us = 0;
+            }
         }
     } else if (ui == UI_CONFIRM_DAY) {
         if (event->button == BSP_BTN_UP || event->button == BSP_BTN_DOWN) confirming_day = !confirming_day;
