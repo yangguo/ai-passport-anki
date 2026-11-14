@@ -1,5 +1,7 @@
 # 状态
 
+2026-11-14：新卡限额、同级打乱、剩余卡数、预报、自动播放及学习辅助功能已落地。本次补齐 CI 运行依赖，固件构建支持 main push / PR / 手动触发，并修复自动深睡前保存失败仍入睡的问题。源码 `0564fc7` 的 [Firmware](https://github.com/yangguo/ai-passport-anki/actions/runs/43575913123) 和 [Host tests](https://github.com/yangguo/ai-passport-anki/actions/runs/43575934179) 均成功；下载产物后已核对源码版本、镜像校验和及分区布局。app 2,691,072 字节，factory 尾部 5,632,000 字节。真机验收仍为 NOT RUN。详见 [本次验证记录](plans/2026-11-14-ci-sleep-checkpoint.md)。
+
 2026-10-31：同一份应用可以装进 Cover Arts 槽，也可以作为单 factory 整机刷写。槽内卡片空间是镜像后的 60 KiB（结构上限 256 张、4096 字节正文），不是 12,000 张。独立 factory 尾部仍是原来的 12,000 张窗口。学习画面改为六行正文和一行评分。真机验收仍为 NOT RUN。详情见 [build.md](build.md) 和 [user-guide.md](user-guide.md)。
 
 2026-10-11：离线首版已实现并通过主机测试与ESP32-C3固件构建；真机验收仍为 NOT RUN。

@@ -43,6 +43,26 @@ Review the checkpoint guard and recovery state explicitly in the source diff.
   cancellation, brightness restoration, full-cycle retry delay, successful retry,
   and import inhibition. Harness: `build/host/verify_idle_sleep.py` (local build
   artifact; not part of the permanent test suite).
-- Full ESP-IDF build not run: no local ESP-IDF installation was found and Docker
-  daemon is unavailable. GitHub Actions has not been dispatched for these edits.
+- At local validation time, no ESP-IDF installation was found and Docker daemon
+  was unavailable. Cloud validation subsequently completed as recorded below.
 - No flashing or hardware acceptance performed.
+
+## GitHub Actions results (2026-11-14)
+
+Source revision: `0564fc77a6c3226e9d3b3b6e042c802dbaef85b8`.
+
+- [Firmware SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/43575913123):
+  ESP-IDF 5.5.3 build, size/layout checks, merged image and artifact upload passed.
+- [Host tests SUCCESS](https://github.com/yangguo/ai-passport-anki/actions/runs/43575934179):
+  installation of runtime/test dependencies, sanitizer C tests and Python tests passed.
+- Downloaded artifacts to `build/ci-43575913123/`; verified source revision,
+  image checksums, padding, factory tail and merged app bytes with
+  `tools/check_firmware_layout.py`.
+- `app.bin`: 2,691,072 bytes; `full.bin`: 2,756,608 bytes. Factory tail:
+  5,632,000 bytes, sufficient for the 12,000-card windows. Linked DRAM:
+  121,188 bytes used, 200,108 bytes remaining (runtime heap unmeasured).
+- SHA-256 `app.bin`:
+  `ab132b40f3b4722d38315d275044a883a4b6cce88fade2e2f7f119cd1b6ea704`.
+- SHA-256 `full.bin`:
+  `735e3a211045431162227b5fa7d06f389dc2c7a34f57e3e27d3e94865e7c9253`.
+- Device acceptance remains NOT RUN; no firmware was flashed.
