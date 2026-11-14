@@ -33,7 +33,7 @@ python3 tools/deck.py upload decks/demo.tsv --port /dev/cu.usbmodem1101
 cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON
 cmake --build build/host
 ctest --test-dir build/host --output-on-failure
-python3 -m pip install -r requirements-dev.txt
+python3 -m pip install -r requirements.txt -r requirements-dev.txt
 python3 -m pytest tests/test_deck.py tests/test_anki_sync.py tests/test_simulator.py tests/test_image_pad.py -q
 ```
 

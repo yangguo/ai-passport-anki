@@ -978,7 +978,15 @@ static void check_idle_sleep(int64_t now)
         return;
     }
     if (now - dim_start_us >= DEEP_SLEEP_AFTER_DIM_US) {
-        (void)pa_store_checkpoint(&store);
+        if (!pa_store_checkpoint(&store)) {
+            ESP_LOGE(TAG, "checkpoint failed; cancelling automatic deep sleep");
+            screen_dimmed = false;
+            last_activity_us = now;
+            dim_start_us = now;
+            bsp_display_backlight(setting_brightness);
+            render();
+            return;
+        }
         (void)bsp_power_enter_deep_sleep();
     }
 }

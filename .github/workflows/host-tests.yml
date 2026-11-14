@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install Python test dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - name: Run host C tests with sanitizers
         run: |
           cmake -S . -B build/host -DANKI_HOST=ON -DANKI_SANITIZERS=ON

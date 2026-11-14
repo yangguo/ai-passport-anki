@@ -2,10 +2,14 @@
 
 ## Automated checks
 
-The host workflow builds and runs CTest with AddressSanitizer and
-UndefinedBehaviorSanitizer, then runs the Python deck importer tests.
+The host workflow installs both runtime and test Python dependencies, builds and
+runs CTest with AddressSanitizer and UndefinedBehaviorSanitizer, then runs the
+Python deck importer tests.
 It covers core scheduling and snapshot validation, UTF-8 page boundaries,
 the bounded USB command parser, and import transaction commit/abort behavior.
+
+Both workflows run on main pushes and pull requests, excluding documentation-only
+changes, and also support manual dispatch.
 
 The firmware workflow builds with ESP-IDF 5.5.3, reports the IDF size summary,
 pads the app image for a Cover Arts slot gap, checks the stock 8 MiB
@@ -24,3 +28,10 @@ heap/stack margin on the ESP32-C3.
 Record each device check with the firmware revision, board identity, exact
 steps, and observed result. A compile or host test result must not be copied
 into the device acceptance column.
+
+For automatic sleep, inject a checkpoint write failure after the screen has
+dimmed for five minutes. Confirm that deep sleep is cancelled, configured
+brightness returns, and input still works. No retry should occur until a fresh
+idle/dim cycle completes. After storage recovers, confirm that checkpointing
+succeeds before deep sleep and the saved state mounts after wake. This fault
+injection check has not yet been accepted on hardware.
